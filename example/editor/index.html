@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Metaverse Sky Editor</title>
+    <link rel="stylesheet" href="./styles.css?v=1" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three/examples/jsm/",
+          "metaverse-sky": "../../index.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main id="app">
+      <section class="panel" aria-label="Sky editor controls">
+        <div class="title-block">
+          <p class="eyebrow">metaverse-sky</p>
+          <h1>Sky Editor</h1>
+          <p>Preetham atmosphere, sun lighting, and procedural voxel clouds.</p>
+        </div>
+
+        <div class="control-group">
+          <label for="sun-azimuth">Sun Azimuth <span id="sun-azimuth-value">135°</span></label>
+          <input id="sun-azimuth" type="range" min="0" max="360" step="1" value="135" />
+
+          <label class="sub-label" for="sun-elevation">Sun Elevation <span id="sun-elevation-value">45°</span></label>
+          <input id="sun-elevation" type="range" min="-20" max="90" step="0.5" value="45" />
+        </div>
+
+        <div class="control-group">
+          <label>Environment</label>
+          <label class="sub-label" for="ibl-min">IBL Min <span id="ibl-min-value">1.00</span></label>
+          <input id="ibl-min" type="range" min="0" max="2" step="0.01" value="1" />
+
+          <label class="sub-label" for="ibl-max">IBL Max <span id="ibl-max-value">2.00</span></label>
+          <input id="ibl-max" type="range" min="0" max="2" step="0.01" value="2" />
+
+          <label class="sub-label" for="exposure">Exposure <span id="exposure-value">0.60</span></label>
+          <input id="exposure" type="range" min="0" max="1" step="0.01" value="0.6" />
+        </div>
+
+        <div class="control-group">
+          <label>Atmosphere</label>
+          <label class="sub-label" for="turbidity">Turbidity <span id="turbidity-value">8.0</span></label>
+          <input id="turbidity" type="range" min="0" max="20" step="0.1" value="8" />
+
+          <label class="sub-label" for="rayleigh">Rayleigh <span id="rayleigh-value">2.20</span></label>
+          <input id="rayleigh" type="range" min="0" max="4" step="0.05" value="2.2" />
+
+          <label class="sub-label" for="mie">Haze (Mie) <span id="mie-value">0.005</span></label>
+          <input id="mie" type="range" min="0" max="0.1" step="0.001" value="0.005" />
+
+          <label class="sub-label" for="mie-g">Sun Glow (Mie-G) <span id="mie-g-value">0.80</span></label>
+          <input id="mie-g" type="range" min="0" max="1" step="0.01" value="0.8" />
+        </div>
+
+        <div class="control-group cloud-controls">
+          <label class="toggle-label" for="clouds-enabled">
+            <input id="clouds-enabled" type="checkbox" checked />
+            <span>Clouds</span>
+          </label>
+
+          <label class="toggle-label" for="cloud-quality">
+            <input id="cloud-quality" type="checkbox" />
+            <span>High Quality (Volumetric)</span>
+          </label>
+
+          <label class="sub-label" for="cloud-opacity">Opacity <span id="cloud-opacity-value">0.95</span></label>
+          <input id="cloud-opacity" type="range" min="0" max="1" step="0.01" value="0.95" />
+
+          <label class="sub-label" for="cloud-altitude">Altitude <span id="cloud-altitude-value">80m</span></label>
+          <input id="cloud-altitude" type="range" min="55" max="140" step="1" value="80" />
+
+          <label class="sub-label" for="cloud-tile">Tiling <span id="cloud-tile-value">6x</span></label>
+          <input id="cloud-tile" type="range" min="3" max="10" step="0.5" value="6" />
+        </div>
+
+        <div class="control-group">
+          <label>Cloud Shape</label>
+          <label class="sub-label" for="puff-scale">Puff Scale <span id="puff-scale-value">1.00</span></label>
+          <input id="puff-scale" type="range" min="0.5" max="2" step="0.05" value="1" />
+
+          <label class="sub-label" for="layer-height">Layer Height <span id="layer-height-value">1.00</span></label>
+          <input id="layer-height" type="range" min="0.5" max="2" step="0.05" value="1" />
+
+          <label class="sub-label" for="roundness">Corner Roundness <span id="roundness-value">0.16</span></label>
+          <input id="roundness" type="range" min="0.05" max="0.35" step="0.01" value="0.16" />
+
+          <label class="sub-label" for="softness">Edge Softness <span id="softness-value">1.00</span></label>
+          <input id="softness" type="range" min="0" max="1" step="0.01" value="1" />
+
+          <label class="sub-label" for="darkness">Darkness <span id="darkness-value">Bright</span></label>
+          <input id="darkness" type="range" min="0" max="1" step="0.01" value="0" />
+        </div>
+
+        <div class="control-group">
+          <label>Cloud Noise</label>
+          <label class="sub-label" for="coverage">Coverage <span id="coverage-value">0.50</span></label>
+          <input id="coverage" type="range" min="0.2" max="0.8" step="0.01" value="0.5" />
+
+          <label class="sub-label" for="noise-scale">Pattern Scale <span id="noise-scale-value">0.028</span></label>
+          <input id="noise-scale" type="range" min="0.01" max="0.08" step="0.001" value="0.028" />
+
+          <label class="sub-label" for="noise-octaves">Detail (Octaves) <span id="noise-octaves-value">5</span></label>
+          <input id="noise-octaves" type="range" min="3" max="7" step="1" value="5" />
+
+          <label class="sub-label" for="noise-jitter">Jitter <span id="noise-jitter-value">0.080</span></label>
+          <input id="noise-jitter" type="range" min="0" max="0.2" step="0.005" value="0.08" />
+
+          <label class="sub-label" for="noise-seed">Seed <span id="noise-seed-value">42</span></label>
+          <input id="noise-seed" type="range" min="0" max="999" step="1" value="42" />
+        </div>
+
+        <div class="control-group">
+          <label for="wind-direction">Wind Direction <span id="wind-direction-value">255°</span></label>
+          <input id="wind-direction" type="range" min="0" max="360" step="1" value="255" />
+
+          <label class="sub-label" for="wind-speed">Wind Speed <span id="wind-speed-value">0.045</span></label>
+          <input id="wind-speed" type="range" min="0" max="0.15" step="0.001" value="0.045" />
+        </div>
+
+        <div class="control-group">
+          <label>Cloud Color</label>
+          <label class="toggle-label" for="auto-tint">
+            <input id="auto-tint" type="checkbox" checked />
+            <span>Tint from Sun</span>
+          </label>
+          <label class="sub-label" for="cloud-color">Base Color</label>
+          <input id="cloud-color" type="color" value="#f2f6fc" />
+        </div>
+
+        <div class="control-group two-up">
+          <button id="randomize-seed" type="button">Randomize Seed</button>
+          <button id="reset-defaults" type="button">Reset Defaults</button>
+        </div>
+
+        <p class="help">
+          Right-drag orbits, wheel zooms, middle-drag pans. Sun and wind
+          sliders feed <code>setSunDirection</code> and
+          <code>setWindDirection</code> — the same interface as
+          <code>metaverse-terrain</code>.
+        </p>
+      </section>
+
+      <canvas id="scene" aria-label="ThreeJS sky scene"></canvas>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

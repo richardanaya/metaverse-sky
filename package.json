@@ -1,0 +1,44 @@
+{
+  "name": "metaverse-sky",
+  "version": "0.1.0",
+  "description": "ES module Three.js sky, atmosphere, sun lighting, and procedural voxel clouds for metaverse scenes",
+  "type": "module",
+  "sideEffects": false,
+  "author": "Richard Anaya",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/richardanaya/metaverse-sky.git"
+  },
+  "homepage": "https://github.com/richardanaya/metaverse-sky#readme",
+  "bugs": {
+    "url": "https://github.com/richardanaya/metaverse-sky/issues"
+  },
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "three": ">=0.160.0"
+  },
+  "keywords": [
+    "three",
+    "threejs",
+    "sky",
+    "clouds",
+    "atmosphere",
+    "metaverse",
+    "webgl",
+    "shader"
+  ]
+}
