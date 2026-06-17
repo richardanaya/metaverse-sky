@@ -25,6 +25,7 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "textures/",
     "LICENSE",
     "README.md"
   ],

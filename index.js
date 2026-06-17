@@ -1021,6 +1021,384 @@ export class CloudLayer {
   }
 }
 
+const PRECIP_POINT_VERT = /* glsl */`
+  attribute float aSeed;
+  attribute float aSize;
+  uniform float uSizeScale;
+  uniform float uFadeNear;
+  uniform float uFadeFar;
+  varying float vSeed;
+  varying float vFade;
+  varying float vDist;
+  void main() {
+    vSeed = aSeed;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * mv;
+    float dist = -mv.z;
+    vDist = dist;
+    gl_PointSize = aSize * uSizeScale * (340.0 / max(dist, 1.0));
+    vFade = 1.0 - smoothstep(uFadeNear, uFadeFar, dist);
+  }
+`;
+
+const PRECIP_POINT_FRAG = /* glsl */`
+  uniform sampler2D uTexture;
+  uniform float uTextureEnabled;
+  uniform vec3 uColor;
+  uniform vec3 uSunColor;
+  uniform float uSunFactor;
+  uniform vec3 uFogColor;
+  uniform float uFogNear;
+  uniform float uFogFar;
+  uniform float uFogEnabled;
+  uniform float uOpacity;
+  uniform float uSoftness;
+  uniform float uTime;
+  uniform float uTwinkle;
+  varying float vSeed;
+  varying float vFade;
+  varying float vDist;
+  void main() {
+    float shapeAlpha;
+    vec3 texColor;
+    if (uTextureEnabled > 0.5) {
+      vec4 tex = texture2D(uTexture, gl_PointCoord);
+      shapeAlpha = tex.a;
+      texColor = tex.rgb;
+    } else {
+      vec2 uv = gl_PointCoord - 0.5;
+      float r = length(uv);
+      shapeAlpha = smoothstep(0.5, 0.5 - uSoftness, r);
+      texColor = vec3(1.0);
+    }
+    if (shapeAlpha < 0.01) discard;
+    float twinkle = 1.0 - uTwinkle + uTwinkle * (0.55 + 0.45 * sin(uTime * 3.0 + vSeed * 50.0));
+    vec3 col = uColor * texColor + uSunColor * uSunFactor * 0.35;
+    if (uFogEnabled > 0.5) {
+      float ff = smoothstep(uFogNear, uFogFar, vDist);
+      col = mix(col, uFogColor, ff * 0.7);
+      shapeAlpha *= 1.0 - ff * 0.5;
+    }
+    gl_FragColor = vec4(col, shapeAlpha * uOpacity * vFade * twinkle);
+  }
+`;
+
+const PRECIP_DEFAULTS = {
+  type: 'none',
+  intensity: 0.7,
+  speed: 1,
+  size: 1,
+  windDrift: 1,
+};
+
+const PRECIP_PROFILES = {
+  rain: {
+    color: 0xaecbe0,
+    size: 0.7,
+    speed: 60,
+    windDrift: 0.6,
+    softness: 0.5,
+    slant: 1,
+    swirl: 0,
+  },
+  snow: {
+    color: 0xf6fbff,
+    size: 0.8,
+    speed: 8,
+    windDrift: 1.4,
+    softness: 0.18,
+    slant: 0.2,
+    swirl: 1,
+  },
+  hail: {
+    color: 0xdce8f2,
+    size: 0.5,
+    speed: 40,
+    windDrift: 0.3,
+    softness: 0.08,
+    slant: 0.1,
+    swirl: 0,
+  },
+};
+
+const PRECIP_MAX = 4000;
+const PRECIP_BOX = { w: 220, h: 140, d: 220 };
+
+export class Precipitation {
+  constructor({ scene, camera, sky = null, textures = {} } = {}) {
+    if (!scene || !camera) throw new Error('metaverse-sky: Precipitation requires `scene` and `camera`');
+    this.scene = scene;
+    this.camera = camera;
+    this.sky = sky;
+    this.params = { ...PRECIP_DEFAULTS };
+    this._profile = null;
+    this._group = new THREE.Group();
+    this._group.visible = false;
+    this.scene.add(this._group);
+
+    this._pos = new Float32Array(PRECIP_MAX * 3);
+    this._seed = new Float32Array(PRECIP_MAX);
+    this._size = new Float32Array(PRECIP_MAX);
+    this._active = 0;
+    this._envelope = 0;
+    this._target = 0;
+    this._fadeStart = 0;
+    this._fadeFrom = 0;
+    this._fadeDur = 0;
+    this._time = 0;
+    this._windX = 0;
+    this._windZ = 0;
+    this._textures = {};
+    this._textureLoader = null;
+    this._ready = false;
+
+    if (textures && Object.keys(textures).length > 0) {
+      this.setTextures(textures);
+    }
+  }
+
+  init() {
+    if (this._ready) return this;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(this._pos, 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(this._seed, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(this._size, 1));
+    geo.setDrawRange(0, 0);
+
+    this._pointMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTexture: { value: null },
+        uTextureEnabled: { value: 0 },
+        uColor: { value: new THREE.Color(0xffffff) },
+        uSunColor: { value: new THREE.Color(0xfff0d2) },
+        uSunFactor: { value: 0 },
+        uFogColor: { value: new THREE.Color(0x9fb7d5) },
+        uFogNear: { value: 60 },
+        uFogFar: { value: 360 },
+        uFogEnabled: { value: 0 },
+        uOpacity: { value: 0 },
+        uSizeScale: { value: 1 },
+        uSoftness: { value: 0.18 },
+        uFadeNear: { value: 12 },
+        uFadeFar: { value: 360 },
+        uTime: { value: 0 },
+        uTwinkle: { value: 0 },
+      },
+      vertexShader: PRECIP_POINT_VERT,
+      fragmentShader: PRECIP_POINT_FRAG,
+      transparent: true,
+      depthWrite: false,
+    });
+    this._points = new THREE.Points(geo, this._pointMat);
+    this._points.frustumCulled = false;
+    this._group.add(this._points);
+
+    this._ready = true;
+    return this;
+  }
+
+  setWindDirection(direction) {
+    const vec = Array.isArray(direction) ? direction : [Number(direction?.x) || 0, Number(direction?.y) || 0];
+    const len = Math.hypot(vec[0], vec[1]) || 1;
+    this._windX = vec[0] / len;
+    this._windZ = vec[1] / len;
+    return this;
+  }
+
+  setWindSpeed(speed) {
+    this._windSpeed = Math.max(0, speed);
+    return this;
+  }
+
+  setTextures(textures = {}) {
+    if (!this._textureLoader) this._textureLoader = new THREE.TextureLoader();
+    for (const [type, url] of Object.entries(textures)) {
+      if (!url) continue;
+      this._textureLoader.load(url, (tex) => {
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.premultiplyAlpha = false;
+        this._textures[type] = tex;
+      });
+    }
+    return this;
+  }
+
+  setPrecipitation(data = {}) {
+    if (data.type != null) this.params.type = data.type;
+    if (data.intensity != null) this.params.intensity = data.intensity;
+    if (data.speed != null) this.params.speed = data.speed;
+    if (data.size != null) this.params.size = data.size;
+    if (data.windDrift != null) this.params.windDrift = data.windDrift;
+    return this._applyType();
+  }
+
+  _applyType() {
+    const wantType = this.params.type;
+    const profile = wantType !== 'none' ? PRECIP_PROFILES[wantType] : null;
+    if (profile) {
+      this._profile = profile;
+      const want = this.params.intensity;
+      this._startFade(want, 2.4);
+    } else {
+      this._profile = null;
+      this._startFade(0, 2.4);
+    }
+    return this;
+  }
+
+  _startFade(target, dur) {
+    this._target = target;
+    this._fadeFrom = this._envelope;
+    this._fadeStart = this._time;
+    this._fadeDur = dur;
+  }
+
+  _envelopeValue() {
+    if (this._fadeDur <= 0) return this._target;
+    const t = (this._time - this._fadeStart) / this._fadeDur;
+    if (t >= 1) return this._target;
+    const e = t * t * (3 - 2 * t);
+    return this._fadeFrom + (this._target - this._fadeFrom) * e;
+  }
+
+  _spawn(i, atTop, cam) {
+    const b = PRECIP_BOX;
+    const depthBias = Math.pow(Math.random(), 1.5);
+    this._pos[i * 3] = cam.x + (Math.random() - 0.5) * b.w;
+    this._pos[i * 3 + 1] = atTop
+      ? cam.y + b.h * 0.3 + Math.random() * b.h * 0.5
+      : cam.y + (Math.random() - 0.25) * b.h;
+    this._pos[i * 3 + 2] = cam.z + (Math.random() - 0.5) * b.d * (0.4 + depthBias);
+    this._seed[i] = Math.random();
+    this._size[i] = 0.4 + Math.random() * 1.3;
+  }
+
+  _syncLighting() {
+    const fog = this.scene?.fog;
+    const fogOn = fog ? 1 : 0;
+    let sunFactor = 0;
+    let sunColor = 0xfff0d2;
+    if (this.sky) {
+      const sun = this.sky.material.uniforms.sunPosition.value;
+      const sunY = clamp(sun.y, -0.1, 1);
+      sunFactor = sunY * 0.6;
+      const warmth = 1 - smoothstep(0.12, 0.62, sunY);
+      const c = new THREE.Color(0xffffff).lerp(new THREE.Color(0xffb36f), warmth * 0.55);
+      sunColor = c.getHex();
+    }
+    const pu = this._pointMat.uniforms;
+    pu.uSunColor.value.setHex(sunColor);
+    pu.uSunFactor.value = sunFactor;
+    pu.uFogEnabled.value = fogOn;
+    if (fog) {
+      pu.uFogColor.value.copy(fog.color);
+      pu.uFogNear.value = fog.near;
+      pu.uFogFar.value = fog.far;
+    }
+  }
+
+  _simulate(dt) {
+    const env = this._envelope;
+    if (env <= 0.001 && this._target <= 0.001) {
+      this._group.visible = false;
+      return;
+    }
+    this._group.visible = true;
+    const prof = this._profile;
+
+    const wantActive = Math.floor(PRECIP_MAX * env);
+    const cam = this.camera.position;
+    while (this._active < wantActive) {
+      this._spawn(this._active, true, cam);
+      this._active += 1;
+    }
+    if (this._active > wantActive) this._active = wantActive;
+
+    if (!prof) return;
+
+    const b = PRECIP_BOX;
+    const fallSpeed = prof.speed * this.params.speed;
+    const driftMul = prof.windDrift * this.params.windDrift;
+    const windSpeed = this._windSpeed || 0;
+    const windMag = windSpeed * 30 * driftMul;
+    const wx = this._windX * windMag;
+    const wz = this._windZ * windMag;
+    const swirl = prof.swirl;
+    const t = this._time;
+
+    const pos = this._pos;
+    const bx = b.w * 0.5;
+    const by = b.h * 0.5;
+    const bz = b.d * 0.5;
+
+    for (let i = 0; i < this._active; i += 1) {
+      const ix = i * 3;
+      const iy = ix + 1;
+      const iz = ix + 2;
+      const seed = this._seed[i];
+
+      let vx = wx;
+      let vz = wz;
+      if (swirl > 0) {
+        vx += Math.sin(t * 1.2 + seed * 31) * swirl * 4;
+        vz += Math.cos(t * 0.9 + seed * 17) * swirl * 4;
+      }
+      pos[ix] += vx * dt;
+      pos[iy] -= fallSpeed * (0.8 + seed * 0.4) * dt;
+      pos[iz] += vz * dt;
+
+      const relx = pos[ix] - cam.x;
+      const rely = pos[iy] - cam.y;
+      const relz = pos[iz] - cam.z;
+      if (rely < -by) {
+        this._spawn(i, true, cam);
+        continue;
+      }
+      if (relx > bx) pos[ix] = cam.x - bx + (relx - bx);
+      else if (relx < -bx) pos[ix] = cam.x + bx + (relx + bx);
+      if (relz > bz) pos[iz] = cam.z - bz + (relz - bz);
+      else if (relz < -bz) pos[iz] = cam.z + bz + (relz + bz);
+    }
+
+    const sizeScale = prof.size * this.params.size;
+    const tex = this._textures[this.params.type];
+    const opacity = env;
+    this._pointMat.uniforms.uColor.value.setHex(prof.color);
+    this._pointMat.uniforms.uOpacity.value = opacity;
+    this._pointMat.uniforms.uSizeScale.value = sizeScale;
+    this._pointMat.uniforms.uSoftness.value = prof.softness;
+    this._pointMat.uniforms.uTwinkle.value = this.params.type === 'snow' ? 0.5 : 0;
+    this._pointMat.uniforms.uTime.value = t;
+    if (tex) {
+      this._pointMat.uniforms.uTexture.value = tex;
+      this._pointMat.uniforms.uTextureEnabled.value = 1;
+    } else {
+      this._pointMat.uniforms.uTextureEnabled.value = 0;
+    }
+    this._points.geometry.setDrawRange(0, this._active);
+    this._points.geometry.getAttribute('position').needsUpdate = true;
+    this._points.geometry.getAttribute('aSeed').needsUpdate = true;
+    this._points.geometry.getAttribute('aSize').needsUpdate = true;
+  }
+
+  update(dt) {
+    if (!this._ready) return;
+    this._time += dt;
+    this._envelope = this._envelopeValue();
+    this._syncLighting();
+    this._simulate(dt);
+  }
+
+  dispose() {
+    if (!this._ready) return;
+    this.scene.remove(this._group);
+    this._points.geometry.dispose();
+    this._pointMat.dispose();
+    this._ready = false;
+  }
+}
+
 export class MetaverseSky {
   constructor({
     scene,
@@ -1030,6 +1408,8 @@ export class MetaverseSky {
     sky = null,
     clouds = true,
     cloudOptions = {},
+    precipitation = false,
+    precipitationOptions = {},
     skyScale = DEFAULT_SKY_SCALE,
     atmosphere = {},
     envIntensityMin = DEFAULT_ENV_INTENSITY_MIN,
@@ -1062,6 +1442,12 @@ export class MetaverseSky {
     this.clouds = clouds
       ? new CloudLayer({ scene, camera, sky: this.sky, ...cloudOptions }).init()
       : null;
+    this.precipitation = precipitation
+      ? new Precipitation({ scene, camera, sky: this.sky, ...precipitationOptions }).init()
+      : null;
+    if (this.precipitation && precipitationOptions.type) {
+      this.precipitation.setPrecipitation({ type: precipitationOptions.type });
+    }
     this.syncEnvironmentLighting();
   }
 
@@ -1087,12 +1473,72 @@ export class MetaverseSky {
 
   setWindDirection(direction) {
     this.clouds?.setWindDirection(direction);
+    this.precipitation?.setWindDirection(direction);
     return this;
   }
 
   setWindSpeed(speed) {
     this.clouds?.setWindSpeed(speed);
+    this.precipitation?.setWindSpeed(speed);
     return this;
+  }
+
+  setWind(directionOrAngle, speed) {
+    let dir;
+    if (Array.isArray(directionOrAngle)) {
+      dir = directionOrAngle;
+    } else if (directionOrAngle?.isVector2) {
+      dir = [directionOrAngle.x, directionOrAngle.y];
+    } else {
+      const rad = THREE.MathUtils.degToRad(Number(directionOrAngle) || 0);
+      dir = [Math.cos(rad), Math.sin(rad)];
+    }
+    this.setWindDirection(dir);
+    if (speed != null) this.setWindSpeed(speed);
+    return this;
+  }
+
+  setPrecipitation(data = {}) {
+    this.precipitation?.setPrecipitation(data);
+    return this;
+  }
+
+  setPrecipitationTextures(textures = {}) {
+    this.precipitation?.setTextures(textures);
+    return this;
+  }
+
+  setExposure(value) {
+    if (this.renderer) this.renderer.toneMappingExposure = value;
+    return this;
+  }
+
+  getExposure() {
+    return this.renderer?.toneMappingExposure ?? null;
+  }
+
+  setAtmosphere(data = {}) {
+    return this.applyAtmosphereSettings(data);
+  }
+
+  getAtmosphere() {
+    return this.getAtmosphereSettings();
+  }
+
+  setClouds(data = {}) {
+    const cloudData = {};
+    for (const [key, val] of Object.entries(data)) {
+      cloudData[`cloud${key[0].toUpperCase()}${key.slice(1)}`] = val;
+    }
+    return this.applyAtmosphereSettings(cloudData);
+  }
+
+  getClouds() {
+    return this.clouds ? this.clouds.getAtmosphereSettings() : null;
+  }
+
+  getPrecipSettings() {
+    return this.precipitation ? { ...this.precipitation.params } : null;
   }
 
   syncEnvironmentLighting(materials = this.environmentMaterials) {
@@ -1158,11 +1604,13 @@ export class MetaverseSky {
   update(deltaTime) {
     this.sky.position.copy(this.camera.position);
     this.clouds?.update(deltaTime);
+    this.precipitation?.update(deltaTime);
     return this;
   }
 
   dispose() {
     this.clouds?.dispose();
+    this.precipitation?.dispose();
     this.scene.remove(this.sky);
     this.sky.geometry?.dispose?.();
     this.sky.material?.dispose?.();

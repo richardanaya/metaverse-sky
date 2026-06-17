@@ -1,6 +1,6 @@
 # metaverse-sky
 
-Three.js sky and atmosphere library with Preetham atmospheric scattering, sun helpers, IBL intensity syncing, a procedural voxel cloud deck, and an optional sky editor panel.
+Three.js sky and atmosphere library with Preetham atmospheric scattering, sun helpers, IBL intensity syncing, a procedural voxel cloud deck, precipitation (rain/snow/hail), and an optional sky editor panel.
 
 ## Install
 
@@ -47,27 +47,99 @@ function animate(dt) {
 }
 ```
 
-## Exports
+## API
+
+### `MetaverseSky`
+
+The main facade. Owns the sky, clouds, precipitation, sun state, and IBL syncing.
+
+```js
+const sky = new MetaverseSky({
+  scene,          // required
+  camera,         // required
+  renderer,       // recommended (for exposure control)
+  light,          // DirectionalLight that follows the sun
+  clouds: true,   // enable cloud layer (default: true)
+  precipitation: true,  // enable precipitation system (default: false)
+  precipitationOptions: {
+    textures: {   // sprite textures for each precip type
+      snow: 'metaverse-sky/textures/snowflake.png',
+      hail: 'metaverse-sky/textures/hailstone.png',
+      rain: 'metaverse-sky/textures/raindrop.png',
+    },
+  },
+});
+```
+
+#### Sun
+
+```js
+sky.setSun(45, 135);                    // by elevation/azimuth degrees
+sky.setSunDirection(new THREE.Vector3(0.3, 0.8, 0.5));  // by direction vector
+```
+
+#### Wind (drives both clouds and precipitation)
+
+```js
+sky.setWind(255, 0.05);    // direction in degrees + speed
+sky.setWind([0.8, 0.6], 0.1);  // or direction as [x, z] + speed
+```
+
+#### Clouds
+
+```js
+sky.setClouds({ opacity: 0.9, coverage: 0.6, softness: 1, darkness: 0.3 });
+sky.getClouds();  // -> current cloud settings
+```
+
+#### Atmosphere (sky shader params)
+
+```js
+sky.setAtmosphere({ turbidity: 10, rayleigh: 2.5, exposure: 0.5 });
+sky.setExposure(0.6);
+sky.getExposure();  // -> 0.6
+```
+
+#### Precipitation
+
+```js
+sky.setPrecipitation({ type: 'snow', intensity: 0.8, speed: 1.5, size: 1.2 });
+sky.setPrecipitationTextures({ snow: './my-snow.png' });
+sky.getPrecipSettings();  // -> current precip settings
+```
+
+Types: `'none'`, `'rain'`, `'snow'`, `'hail'`. Each eases in/out over 2.4s when toggled.
+
+#### Per-frame
+
+```js
+sky.update(deltaTime);  // call every frame
+sky.dispose();          // cleanup
+```
+
+### Exports
 
 | Export | Purpose |
 |--------|---------|
-| `MetaverseSky` | Owns a Three.js `Sky`, optional `CloudLayer`, sun state, and environment intensity syncing |
-| `CloudLayer` | Procedural scrolling voxel cloud deck from `metaverse-world` |
-| `SkyEditor` | DOM panel for sun, atmosphere, exposure, IBL, and cloud settings |
+| `MetaverseSky` | Facade: sky + clouds + precipitation + sun + IBL |
+| `CloudLayer` | Procedural scrolling voxel cloud deck |
+| `Precipitation` | Particle-based rain/snow/hail with wind response |
+| `SkyEditor` | DOM panel for live-tweaking all settings |
 | `createAtmosphereSky` | Create and initialize a Three.js `Sky` object |
 | `setSkySun` | Apply elevation and azimuth to sky uniforms and optional light |
 | `syncEnvironmentIntensity` | Update `scene.environmentIntensity` and material `envMapIntensity` from sun elevation |
 | `sunDirectionFromAngles` | Convert elevation and azimuth to a normalized sun direction |
 | `getSunAnglesFromDirection` | Convert a sun direction to elevation and azimuth |
 
-## Example
+## Examples
 
 ```bash
 cd metaverse-sky
 python3 -m http.server 8080
 ```
 
-Open [http://localhost:8080/example/simple/](http://localhost:8080/example/simple/).
+- [Minimal](http://localhost:8080/example/simple/) — smallest integration
+- [Editor](http://localhost:8080/example/editor/) — full control panel with all sliders
 
 ## License
 

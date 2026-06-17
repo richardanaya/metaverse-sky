@@ -102,6 +102,38 @@ export function showPanel(panel: HTMLElement, options?: { display?: string }): v
 export function hidePanel(panel: HTMLElement): void;
 export function isPanelOpen(panel: HTMLElement): boolean;
 
+export type PrecipType = 'none' | 'rain' | 'snow' | 'hail';
+
+export interface PrecipSettings {
+  type: PrecipType;
+  intensity: number;
+  speed: number;
+  size: number;
+  windDrift: number;
+}
+
+export interface PrecipitationOptions extends Partial<PrecipSettings> {
+  scene: THREE.Scene;
+  camera: THREE.Camera;
+  sky?: Sky | null;
+  textures?: Partial<Record<PrecipType, string>>;
+}
+
+export class Precipitation {
+  scene: THREE.Scene;
+  camera: THREE.Camera;
+  sky: Sky | null;
+  params: PrecipSettings;
+  constructor(options: PrecipitationOptions);
+  init(): this;
+  setPrecipitation(data?: Partial<PrecipSettings>): this;
+  setTextures(textures?: Partial<Record<PrecipType, string>>): this;
+  setWindDirection(direction: [number, number] | THREE.Vector2): this;
+  setWindSpeed(speed: number): this;
+  update(deltaTime: number): void;
+  dispose(): void;
+}
+
 export interface CloudLayerOptions extends Partial<CloudSettings> {
   scene: THREE.Scene;
   camera: THREE.Camera;
@@ -132,6 +164,8 @@ export interface MetaverseSkyOptions {
   sky?: Sky | null;
   clouds?: boolean;
   cloudOptions?: Partial<CloudSettings>;
+  precipitation?: boolean;
+  precipitationOptions?: Partial<PrecipSettings> & { type?: PrecipType; textures?: Partial<Record<PrecipType, string>> };
   skyScale?: number;
   atmosphere?: CreateAtmosphereSkyOptions & AtmosphereSettings;
   envIntensityMin?: number;
@@ -147,16 +181,33 @@ export class MetaverseSky {
   light: THREE.Light | null;
   sky: Sky;
   clouds: CloudLayer | null;
+  precipitation: Precipitation | null;
   elevation: number;
   azimuth: number;
   envIntensityMin: number;
   envIntensityMax: number;
   environmentMaterials: THREE.Material[];
   constructor(options: MetaverseSkyOptions);
+
   setSun(elevation?: number, azimuth?: number): this;
   setSunDirection(direction: THREE.Vector3 | [number, number, number]): this;
+
+  setWind(directionOrAngle: number | [number, number] | THREE.Vector2, speed?: number): this;
   setWindDirection(direction: [number, number] | THREE.Vector2): this;
   setWindSpeed(speed: number): this;
+
+  setPrecipitation(data?: Partial<PrecipSettings> & { type?: PrecipType }): this;
+  setPrecipitationTextures(textures?: Partial<Record<PrecipType, string>>): this;
+  getPrecipSettings(): PrecipSettings | null;
+
+  setExposure(value: number): this;
+  getExposure(): number | null;
+
+  setAtmosphere(data?: AtmosphereSettings): this;
+  getAtmosphere(): AtmosphereSettings;
+  setClouds(data?: Partial<CloudSettings>): this;
+  getClouds(): AtmosphereSettings | null;
+
   syncEnvironmentLighting(materials?: THREE.Material[]): number;
   addEnvironmentMaterial(material: THREE.Material): this;
   getAtmosphereSettings(): AtmosphereSettings;

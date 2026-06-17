@@ -57,6 +57,15 @@ const windSpeedValue = document.querySelector('#wind-speed-value');
 const autoTintInput = document.querySelector('#auto-tint');
 const cloudColorInput = document.querySelector('#cloud-color');
 const cloudControls = document.querySelector('.cloud-controls');
+const precipButtons = [...document.querySelectorAll('[data-precip]')];
+const precipIntensityInput = document.querySelector('#precip-intensity');
+const precipIntensityValue = document.querySelector('#precip-intensity-value');
+const precipSpeedInput = document.querySelector('#precip-speed');
+const precipSpeedValue = document.querySelector('#precip-speed-value');
+const precipSizeInput = document.querySelector('#precip-size');
+const precipSizeValue = document.querySelector('#precip-size-value');
+const precipWindInput = document.querySelector('#precip-wind');
+const precipWindValue = document.querySelector('#precip-wind-value');
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x9fb7d5, 300, 700);
@@ -95,6 +104,14 @@ const sky = new MetaverseSky({
   renderer,
   light: sunLight,
   clouds: true,
+  precipitation: true,
+  precipitationOptions: {
+    textures: {
+      rain: '../../textures/raindrop.png',
+      snow: '../../textures/snowflake.png',
+      hail: '../../textures/hailstone.png',
+    },
+  },
   atmosphere: {
     elevation: Number(sunElevationInput.value),
     azimuth: Number(sunAzimuthInput.value),
@@ -283,6 +300,35 @@ function bindPanel() {
     return value.toFixed(3);
   });
 
+  precipButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const type = button.dataset.precip;
+      precipButtons.forEach((b) => b.classList.toggle('active', b === button));
+      sky.setPrecipitation({ type });
+      syncPrecipControlsEnabled(type);
+    });
+  });
+
+  bindRange(precipIntensityInput, precipIntensityValue, (value) => {
+    sky.setPrecipitation({ intensity: value });
+    return value.toFixed(2);
+  });
+
+  bindRange(precipSpeedInput, precipSpeedValue, (value) => {
+    sky.setPrecipitation({ speed: value });
+    return `${value.toFixed(1)}x`;
+  });
+
+  bindRange(precipSizeInput, precipSizeValue, (value) => {
+    sky.setPrecipitation({ size: value });
+    return `${value.toFixed(1)}x`;
+  });
+
+  bindRange(precipWindInput, precipWindValue, (value) => {
+    sky.setPrecipitation({ windDrift: value });
+    return `${value.toFixed(1)}x`;
+  });
+
   autoTintInput.addEventListener('change', () => {
     sky.applyAtmosphereSettings({ cloudAutoTint: autoTintInput.checked });
   });
@@ -323,6 +369,13 @@ function syncCloudControlsEnabled() {
   cloudQualityInput.disabled = !on;
   autoTintInput.disabled = !on;
   cloudColorInput.disabled = !on;
+}
+
+function syncPrecipControlsEnabled(type) {
+  const on = type !== 'none';
+  [precipIntensityInput, precipSpeedInput, precipSizeInput, precipWindInput].forEach((input) => {
+    input.disabled = !on;
+  });
 }
 
 function resetDefaults() {
