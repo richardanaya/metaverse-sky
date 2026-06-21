@@ -1,6 +1,6 @@
 # metaverse-sky
 
-Three.js WebGPU/TSL sky and atmosphere library with an analytic atmospheric dome, sun helpers, IBL intensity syncing, a procedural voxel cloud deck, precipitation (rain/snow/hail), and an optional sky editor panel.
+Three.js WebGPU/TSL sky and atmosphere library with an analytic atmospheric dome, sun helpers, IBL intensity syncing, fast 2.5D sky-volume clouds, precipitation (rain/snow/hail), and an optional sky editor panel.
 
 ## Install
 
@@ -91,7 +91,15 @@ sky.setWind([0.8, 0.6], 0.1);  // or direction as [x, z] + speed
 #### Clouds
 
 ```js
-sky.setClouds({ opacity: 0.9, coverage: 0.6, softness: 1, darkness: 0.3 });
+sky.setClouds({
+  opacity: 0.9,
+  coverage: 0.6,
+  drawDistance: 420,
+  detailStrength: 0.5,
+  sharpness: 0.4,
+  wispiness: 0.5,
+  darkness: 0.3,
+});
 sky.getClouds();  // -> current cloud settings
 ```
 
@@ -125,7 +133,7 @@ sky.dispose();          // cleanup
 | Export | Purpose |
 |--------|---------|
 | `MetaverseSky` | Facade: sky + clouds + precipitation + sun + IBL |
-| `CloudLayer` | Procedural scrolling voxel cloud deck |
+| `CloudSkyLayer` | Fast procedural 2.5D sky-volume cloud layer |
 | `Precipitation` | Particle-based rain/snow/hail with wind response |
 | `SkyEditor` | DOM panel for live-tweaking all settings |
 | `createAtmosphereSky` | Create and initialize a Three.js `Sky` object |

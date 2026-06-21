@@ -13,26 +13,25 @@ export const DEFAULT_ENV_INTENSITY_MAX: number;
 export const ELEVATION_MIN: number;
 export const ELEVATION_MAX: number;
 
+export type CloudRenderMode = 'volume';
+
 export interface CloudSettings {
   enabled: boolean;
+  renderMode: CloudRenderMode;
   altitude: number;
   opacity: number;
   windSpeed: number;
   windDirection: number;
   tile: number;
+  drawDistance: number;
   cloudColor: THREE.ColorRepresentation;
   autoTint: boolean;
-  puffScale: number;
-  layerHeight: number;
   coverage: number;
-  noiseSeed: number;
   noiseScale: number;
-  noiseOctaves: number;
-  noiseJitter: number;
-  roundness: number;
-  softness: number;
+  detailStrength: number;
+  sharpness: number;
+  wispiness: number;
   darkness: number;
-  quality: number;
 }
 
 export const DEFAULT_CLOUD_SETTINGS: Readonly<CloudSettings>;
@@ -49,24 +48,21 @@ export interface AtmosphereSettings {
   envIntensityMax?: number;
   sunPosition?: [number, number, number] | THREE.Vector3;
   cloudsEnabled?: boolean;
+  cloudRenderMode?: CloudRenderMode;
   cloudOpacity?: number;
   cloudAltitude?: number;
   cloudWindSpeed?: number;
   cloudWindDirection?: number;
   cloudTile?: number;
+  cloudDrawDistance?: number;
   cloudColor?: THREE.ColorRepresentation;
   cloudAutoTint?: boolean;
-  cloudPuffScale?: number;
-  cloudLayerHeight?: number;
   cloudCoverage?: number;
-  cloudNoiseSeed?: number;
   cloudNoiseScale?: number;
-  cloudNoiseOctaves?: number;
-  cloudNoiseJitter?: number;
-  cloudRoundness?: number;
-  cloudSoftness?: number;
+  cloudDetailStrength?: number;
+  cloudSharpness?: number;
+  cloudWispiness?: number;
   cloudDarkness?: number;
-  cloudQuality?: number;
 }
 
 export interface CreateAtmosphereSkyOptions {
@@ -134,18 +130,18 @@ export class Precipitation {
   dispose(): void;
 }
 
-export interface CloudLayerOptions extends Partial<CloudSettings> {
+export interface CloudSkyLayerOptions extends Partial<CloudSettings> {
   scene: THREE.Scene;
   camera: THREE.Camera;
   sky?: Sky | null;
 }
 
-export class CloudLayer {
+export class CloudSkyLayer {
   scene: THREE.Scene;
   camera: THREE.Camera;
   sky: Sky | null;
   params: CloudSettings & { cloudColor: THREE.Color };
-  constructor(options: CloudLayerOptions);
+  constructor(options: CloudSkyLayerOptions);
   init(): this;
   getAtmosphereSettings(): AtmosphereSettings;
   applyAtmosphereSettings(data?: AtmosphereSettings): this;
@@ -155,6 +151,7 @@ export class CloudLayer {
   update(deltaTime: number): void;
   dispose(): void;
 }
+
 
 export interface MetaverseSkyOptions {
   scene: THREE.Scene;
@@ -180,7 +177,7 @@ export class MetaverseSky {
   renderer: THREE.WebGLRenderer | null;
   light: THREE.Light | null;
   sky: Sky;
-  clouds: CloudLayer | null;
+  clouds: CloudSkyLayer | null;
   precipitation: Precipitation | null;
   elevation: number;
   azimuth: number;
@@ -220,7 +217,7 @@ export interface SkyEditorOptions {
   sky: Sky;
   light?: THREE.Light | null;
   renderer?: THREE.WebGLRenderer;
-  clouds?: CloudLayer | null;
+  clouds?: CloudSkyLayer | null;
   onSunChange?: (() => void) | null;
   envIntensityMin?: number;
   envIntensityMax?: number;
@@ -230,7 +227,7 @@ export class SkyEditor {
   sky: Sky;
   light: THREE.Light | null;
   renderer?: THREE.WebGLRenderer;
-  clouds: CloudLayer | null;
+  clouds: CloudSkyLayer | null;
   elevation: number;
   azimuth: number;
   envIntensityMin: number;

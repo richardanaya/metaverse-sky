@@ -81,6 +81,27 @@ body {
   text-transform: uppercase;
 }
 
+.fps-meter {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: baseline;
+  margin-top: 0.7rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid rgba(139, 213, 255, 0.28);
+  border-radius: 999px;
+  background: rgba(139, 213, 255, 0.1);
+  color: #b9c6d8;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.fps-meter strong {
+  color: #8bd5ff;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+}
+
 .control-group {
   display: grid;
   gap: 0.55rem;

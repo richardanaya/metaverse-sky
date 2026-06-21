@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MetaverseSky, DEFAULT_CLOUD_SETTINGS } from 'metaverse-sky';
 
 const canvas = document.querySelector('#scene');
+const fpsValue = document.querySelector('#fps-value');
 
 const sunAzimuthInput = document.querySelector('#sun-azimuth');
 const sunElevationInput = document.querySelector('#sun-elevation');
@@ -23,33 +24,26 @@ const mieValue = document.querySelector('#mie-value');
 const mieGInput = document.querySelector('#mie-g');
 const mieGValue = document.querySelector('#mie-g-value');
 const cloudsEnabledInput = document.querySelector('#clouds-enabled');
-const cloudQualityInput = document.querySelector('#cloud-quality');
 const cloudOpacityInput = document.querySelector('#cloud-opacity');
 const cloudOpacityValue = document.querySelector('#cloud-opacity-value');
 const cloudAltitudeInput = document.querySelector('#cloud-altitude');
 const cloudAltitudeValue = document.querySelector('#cloud-altitude-value');
+const cloudDrawDistanceInput = document.querySelector('#cloud-draw-distance');
+const cloudDrawDistanceValue = document.querySelector('#cloud-draw-distance-value');
 const cloudTileInput = document.querySelector('#cloud-tile');
 const cloudTileValue = document.querySelector('#cloud-tile-value');
-const puffScaleInput = document.querySelector('#puff-scale');
-const puffScaleValue = document.querySelector('#puff-scale-value');
-const layerHeightInput = document.querySelector('#layer-height');
-const layerHeightValue = document.querySelector('#layer-height-value');
-const roundnessInput = document.querySelector('#roundness');
-const roundnessValue = document.querySelector('#roundness-value');
-const softnessInput = document.querySelector('#softness');
-const softnessValue = document.querySelector('#softness-value');
 const darknessInput = document.querySelector('#darkness');
 const darknessValue = document.querySelector('#darkness-value');
 const coverageInput = document.querySelector('#coverage');
 const coverageValue = document.querySelector('#coverage-value');
 const noiseScaleInput = document.querySelector('#noise-scale');
 const noiseScaleValue = document.querySelector('#noise-scale-value');
-const noiseOctavesInput = document.querySelector('#noise-octaves');
-const noiseOctavesValue = document.querySelector('#noise-octaves-value');
-const noiseJitterInput = document.querySelector('#noise-jitter');
-const noiseJitterValue = document.querySelector('#noise-jitter-value');
-const noiseSeedInput = document.querySelector('#noise-seed');
-const noiseSeedValue = document.querySelector('#noise-seed-value');
+const detailStrengthInput = document.querySelector('#detail-strength');
+const detailStrengthValue = document.querySelector('#detail-strength-value');
+const sharpnessInput = document.querySelector('#sharpness');
+const sharpnessValue = document.querySelector('#sharpness-value');
+const wispinessInput = document.querySelector('#wispiness');
+const wispinessValue = document.querySelector('#wispiness-value');
 const windDirectionInput = document.querySelector('#wind-direction');
 const windSpeedInput = document.querySelector('#wind-speed');
 const windDirectionValue = document.querySelector('#wind-direction-value');
@@ -144,8 +138,18 @@ bindPanel();
 syncCloudControlsEnabled();
 
 const clock = new THREE.Clock();
+let fpsFrames = 0;
+let fpsElapsed = 0;
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.05);
+  fpsFrames += 1;
+  fpsElapsed += rawDt;
+  if (fpsElapsed >= 0.5) {
+    fpsValue.textContent = String(Math.round(fpsFrames / fpsElapsed));
+    fpsFrames = 0;
+    fpsElapsed = 0;
+  }
   controls.update();
   sky.update(dt);
   renderer.render(scene, camera);
@@ -218,10 +222,6 @@ function bindPanel() {
     syncCloudControlsEnabled();
   });
 
-  cloudQualityInput.addEventListener('change', () => {
-    sky.applyAtmosphereSettings({ cloudQuality: cloudQualityInput.checked ? 1 : 0 });
-  });
-
   bindRange(cloudOpacityInput, cloudOpacityValue, (value) => {
     sky.applyAtmosphereSettings({ cloudOpacity: value });
     return value.toFixed(2);
@@ -232,29 +232,14 @@ function bindPanel() {
     return `${value}m`;
   });
 
+  bindRange(cloudDrawDistanceInput, cloudDrawDistanceValue, (value) => {
+    sky.applyAtmosphereSettings({ cloudDrawDistance: value });
+    return `${value}m`;
+  });
+
   bindRange(cloudTileInput, cloudTileValue, (value) => {
     sky.applyAtmosphereSettings({ cloudTile: value });
     return `${value}x`;
-  });
-
-  bindRange(puffScaleInput, puffScaleValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudPuffScale: value });
-    return value.toFixed(2);
-  });
-
-  bindRange(layerHeightInput, layerHeightValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudLayerHeight: value });
-    return value.toFixed(2);
-  });
-
-  bindRange(roundnessInput, roundnessValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudRoundness: value });
-    return value.toFixed(2);
-  });
-
-  bindRange(softnessInput, softnessValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudSoftness: value });
-    return value.toFixed(2);
   });
 
   bindRange(darknessInput, darknessValue, (value) => {
@@ -275,19 +260,19 @@ function bindPanel() {
     return value.toFixed(3);
   });
 
-  bindRange(noiseOctavesInput, noiseOctavesValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudNoiseOctaves: value });
-    return String(Math.round(value));
+  bindRange(detailStrengthInput, detailStrengthValue, (value) => {
+    sky.applyAtmosphereSettings({ cloudDetailStrength: value });
+    return value.toFixed(2);
   });
 
-  bindRange(noiseJitterInput, noiseJitterValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudNoiseJitter: value });
-    return value.toFixed(3);
+  bindRange(sharpnessInput, sharpnessValue, (value) => {
+    sky.applyAtmosphereSettings({ cloudSharpness: value });
+    return value.toFixed(2);
   });
 
-  bindRange(noiseSeedInput, noiseSeedValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudNoiseSeed: value });
-    return String(Math.round(value));
+  bindRange(wispinessInput, wispinessValue, (value) => {
+    sky.applyAtmosphereSettings({ cloudWispiness: value });
+    return value.toFixed(2);
   });
 
   bindRange(windDirectionInput, windDirectionValue, (value) => {
@@ -340,13 +325,6 @@ function bindPanel() {
     autoTintInput.checked = false;
   });
 
-  document.querySelector('#randomize-seed').addEventListener('click', () => {
-    const seed = Math.floor(Math.random() * 1000);
-    noiseSeedInput.value = String(seed);
-    noiseSeedValue.textContent = String(seed);
-    sky.applyAtmosphereSettings({ cloudNoiseSeed: seed });
-  });
-
   document.querySelector('#reset-defaults').addEventListener('click', () => {
     resetDefaults();
   });
@@ -367,7 +345,6 @@ function updateSunPosition(azimuthDeg, elevationDeg) {
 function syncCloudControlsEnabled() {
   const on = cloudsEnabledInput.checked;
   cloudControls.classList.toggle('is-disabled', !on);
-  cloudQualityInput.disabled = !on;
   autoTintInput.disabled = !on;
   cloudColorInput.disabled = !on;
 }
@@ -387,29 +364,34 @@ function resetDefaults() {
   };
   setRange(cloudOpacityInput, d.opacity, cloudOpacityValue, (v) => v.toFixed(2));
   setRange(cloudAltitudeInput, d.altitude, cloudAltitudeValue, (v) => `${v}m`);
+  setRange(cloudDrawDistanceInput, d.drawDistance, cloudDrawDistanceValue, (v) => `${v}m`);
   setRange(cloudTileInput, d.tile, cloudTileValue, (v) => `${v}x`);
-  setRange(puffScaleInput, d.puffScale, puffScaleValue, (v) => v.toFixed(2));
-  setRange(layerHeightInput, d.layerHeight, layerHeightValue, (v) => v.toFixed(2));
-  setRange(roundnessInput, d.roundness, roundnessValue, (v) => v.toFixed(2));
-  setRange(softnessInput, d.softness, softnessValue, (v) => v.toFixed(2));
   setRange(darknessInput, d.darkness, darknessValue, (v) => (v < 0.2 ? 'Bright' : v < 0.45 ? 'Cloudy' : v < 0.7 ? 'Overcast' : 'Storm'));
   setRange(coverageInput, d.coverage, coverageValue, (v) => v.toFixed(2));
   setRange(noiseScaleInput, d.noiseScale, noiseScaleValue, (v) => v.toFixed(3));
-  setRange(noiseOctavesInput, d.noiseOctaves, noiseOctavesValue, (v) => String(Math.round(v)));
-  setRange(noiseJitterInput, d.noiseJitter, noiseJitterValue, (v) => v.toFixed(3));
-  setRange(noiseSeedInput, d.noiseSeed, noiseSeedValue, (v) => String(Math.round(v)));
+  setRange(detailStrengthInput, d.detailStrength, detailStrengthValue, (v) => v.toFixed(2));
+  setRange(sharpnessInput, d.sharpness, sharpnessValue, (v) => v.toFixed(2));
+  setRange(wispinessInput, d.wispiness, wispinessValue, (v) => v.toFixed(2));
   setRange(windDirectionInput, d.windDirection, windDirectionValue, (v) => `${v}°`);
   setRange(windSpeedInput, d.windSpeed, windSpeedValue, (v) => v.toFixed(3));
 
   cloudColorInput.value = `#${d.cloudColor.toString(16).padStart(6, '0')}`;
   autoTintInput.checked = d.autoTint;
-  cloudQualityInput.checked = false;
 
   sky.applyAtmosphereSettings({
-    ...d,
-    cloudColor: d.cloudColor,
     cloudsEnabled: cloudsEnabledInput.checked,
-    cloudQuality: 0,
+    cloudOpacity: d.opacity,
+    cloudAltitude: d.altitude,
+    cloudDrawDistance: d.drawDistance,
+    cloudTile: d.tile,
+    cloudCoverage: d.coverage,
+    cloudNoiseScale: d.noiseScale,
+    cloudDetailStrength: d.detailStrength,
+    cloudSharpness: d.sharpness,
+    cloudWispiness: d.wispiness,
+    cloudDarkness: d.darkness,
+    cloudColor: d.cloudColor,
+    cloudAutoTint: d.autoTint,
   });
   const rad = THREE.MathUtils.degToRad(d.windDirection);
   sky.setWindDirection([Math.cos(rad), Math.sin(rad)]);

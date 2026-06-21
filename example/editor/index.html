@@ -23,7 +23,8 @@
         <div class="title-block">
           <p class="eyebrow">metaverse-sky</p>
           <h1>Sky Editor</h1>
-          <p>TSL atmosphere, sun lighting, and procedural voxel clouds.</p>
+          <p>TSL atmosphere, sun lighting, and fast 2.5D sky-volume clouds.</p>
+          <div class="fps-meter" aria-live="polite">FPS <strong id="fps-value">--</strong></div>
         </div>
 
         <div class="control-group">
@@ -67,35 +68,21 @@
             <span>Clouds</span>
           </label>
 
-          <label class="toggle-label" for="cloud-quality">
-            <input id="cloud-quality" type="checkbox" />
-            <span>High Quality (Volumetric)</span>
-          </label>
-
           <label class="sub-label" for="cloud-opacity">Opacity <span id="cloud-opacity-value">0.95</span></label>
           <input id="cloud-opacity" type="range" min="0" max="1" step="0.01" value="0.95" />
 
           <label class="sub-label" for="cloud-altitude">Altitude <span id="cloud-altitude-value">80m</span></label>
-          <input id="cloud-altitude" type="range" min="55" max="140" step="1" value="80" />
+          <input id="cloud-altitude" type="range" min="55" max="220" step="1" value="80" />
+
+          <label class="sub-label" for="cloud-draw-distance">Draw Distance <span id="cloud-draw-distance-value">420m</span></label>
+          <input id="cloud-draw-distance" type="range" min="120" max="900" step="10" value="420" />
 
           <label class="sub-label" for="cloud-tile">Tiling <span id="cloud-tile-value">6x</span></label>
           <input id="cloud-tile" type="range" min="3" max="10" step="0.5" value="6" />
         </div>
 
         <div class="control-group">
-          <label>Cloud Shape</label>
-          <label class="sub-label" for="puff-scale">Puff Scale <span id="puff-scale-value">1.00</span></label>
-          <input id="puff-scale" type="range" min="0.5" max="2" step="0.05" value="1" />
-
-          <label class="sub-label" for="layer-height">Layer Height <span id="layer-height-value">1.00</span></label>
-          <input id="layer-height" type="range" min="0.5" max="2" step="0.05" value="1" />
-
-          <label class="sub-label" for="roundness">Corner Roundness <span id="roundness-value">0.16</span></label>
-          <input id="roundness" type="range" min="0.05" max="0.35" step="0.01" value="0.16" />
-
-          <label class="sub-label" for="softness">Edge Softness <span id="softness-value">1.00</span></label>
-          <input id="softness" type="range" min="0" max="1" step="0.01" value="1" />
-
+          <label>Cloud Shading</label>
           <label class="sub-label" for="darkness">Darkness <span id="darkness-value">Bright</span></label>
           <input id="darkness" type="range" min="0" max="1" step="0.01" value="0" />
         </div>
@@ -108,14 +95,14 @@
           <label class="sub-label" for="noise-scale">Pattern Scale <span id="noise-scale-value">0.028</span></label>
           <input id="noise-scale" type="range" min="0.01" max="0.08" step="0.001" value="0.028" />
 
-          <label class="sub-label" for="noise-octaves">Detail (Octaves) <span id="noise-octaves-value">5</span></label>
-          <input id="noise-octaves" type="range" min="3" max="7" step="1" value="5" />
+          <label class="sub-label" for="detail-strength">Edge Detail <span id="detail-strength-value">0.45</span></label>
+          <input id="detail-strength" type="range" min="0" max="1" step="0.01" value="0.45" />
 
-          <label class="sub-label" for="noise-jitter">Jitter <span id="noise-jitter-value">0.080</span></label>
-          <input id="noise-jitter" type="range" min="0" max="0.2" step="0.005" value="0.08" />
+          <label class="sub-label" for="sharpness">Sharpness <span id="sharpness-value">0.35</span></label>
+          <input id="sharpness" type="range" min="0" max="1" step="0.01" value="0.35" />
 
-          <label class="sub-label" for="noise-seed">Seed <span id="noise-seed-value">42</span></label>
-          <input id="noise-seed" type="range" min="0" max="999" step="1" value="42" />
+          <label class="sub-label" for="wispiness">Wispiness <span id="wispiness-value">0.45</span></label>
+          <input id="wispiness" type="range" min="0" max="1" step="0.01" value="0.45" />
         </div>
 
         <div class="control-group">
@@ -159,7 +146,6 @@
         </div>
 
         <div class="control-group two-up">
-          <button id="randomize-seed" type="button">Randomize Seed</button>
           <button id="reset-defaults" type="button">Reset Defaults</button>
         </div>
 

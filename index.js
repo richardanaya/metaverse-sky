@@ -1,5 +1,5 @@
 /**
- * metaverse-sky - Three.js WebGPU/TSL sky, sun helpers, and procedural voxel clouds.
+ * metaverse-sky - Three.js WebGPU/TSL sky, sun helpers, and fast 2.5D sky-volume clouds.
  *
  * Peer dependency: the host app must resolve `three` and `three/addons/`.
  */
@@ -26,53 +26,42 @@ export const ELEVATION_MAX = 90;
 
 const FADE_MS = 280;
 
-const MASK_SIZE = 256;
-
-const CLOUD_LAYERS = [
-  { yOff: 0, thickness: 13, opacityMul: 0.4, phaseU: 0, phaseV: 0 },
-  { yOff: 4.5, thickness: 10.5, opacityMul: 0.3, phaseU: 64, phaseV: 64 },
-  { yOff: 9, thickness: 11, opacityMul: 0.28, phaseU: 128, phaseV: 0 },
-];
 
 const CLOUD_DEFAULTS = {
   enabled: true,
+  renderMode: 'volume',
   altitude: 80,
   opacity: 0.95,
   windSpeed: 0.045,
   windDirection: 255,
   tile: 6,
+  drawDistance: 420,
   cloudColor: new THREE.Color(0xf2f6fc),
   autoTint: true,
-  puffScale: 1,
-  layerHeight: 1,
   coverage: 0.5,
-  noiseSeed: 42,
   noiseScale: 0.028,
-  noiseOctaves: 5,
-  noiseJitter: 0.08,
-  roundness: 0.16,
-  softness: 1,
+  detailStrength: 0.45,
+  sharpness: 0.35,
+  wispiness: 0.45,
   darkness: 0,
 };
 
 export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
   enabled: CLOUD_DEFAULTS.enabled,
+  renderMode: CLOUD_DEFAULTS.renderMode,
   altitude: CLOUD_DEFAULTS.altitude,
   opacity: CLOUD_DEFAULTS.opacity,
   windSpeed: CLOUD_DEFAULTS.windSpeed,
   windDirection: CLOUD_DEFAULTS.windDirection,
   tile: CLOUD_DEFAULTS.tile,
+  drawDistance: CLOUD_DEFAULTS.drawDistance,
   cloudColor: CLOUD_DEFAULTS.cloudColor.getHex(),
   autoTint: CLOUD_DEFAULTS.autoTint,
-  puffScale: CLOUD_DEFAULTS.puffScale,
-  layerHeight: CLOUD_DEFAULTS.layerHeight,
   coverage: CLOUD_DEFAULTS.coverage,
-  noiseSeed: CLOUD_DEFAULTS.noiseSeed,
   noiseScale: CLOUD_DEFAULTS.noiseScale,
-  noiseOctaves: CLOUD_DEFAULTS.noiseOctaves,
-  noiseJitter: CLOUD_DEFAULTS.noiseJitter,
-  roundness: CLOUD_DEFAULTS.roundness,
-  softness: CLOUD_DEFAULTS.softness,
+  detailStrength: CLOUD_DEFAULTS.detailStrength,
+  sharpness: CLOUD_DEFAULTS.sharpness,
+  wispiness: CLOUD_DEFAULTS.wispiness,
   darkness: CLOUD_DEFAULTS.darkness,
 });
 
@@ -162,163 +151,251 @@ function vnoise3Node(p) {
   );
 }
 
-function createPuffMaterial(color, opacity, roundness, softness, quality) {
+function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, sharpness, wispiness) {
   const material = new THREE.MeshBasicNodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
-  material.side = quality ? THREE.DoubleSide : THREE.FrontSide;
+  material.side = THREE.DoubleSide;
   material.toneMapped = false;
 
   const u = {
     uColor: assignUniform(material, 'uColor', uniform(color.clone())),
     uOpacity: assignUniform(material, 'uOpacity', uniform(opacity)),
-    uRoundness: assignUniform(material, 'uRoundness', uniform(roundness)),
-    uSoftness: assignUniform(material, 'uSoftness', uniform(softness)),
-    uFogColor: assignUniform(material, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
-    uFogNear: assignUniform(material, 'uFogNear', uniform(300)),
-    uFogFar: assignUniform(material, 'uFogFar', uniform(700)),
-    uFogEnabled: assignUniform(material, 'uFogEnabled', uniform(1)),
+    uCoverage: assignUniform(material, 'uCoverage', uniform(coverage)),
+    uDetailStrength: assignUniform(material, 'uDetailStrength', uniform(detailStrength)),
+    uSharpness: assignUniform(material, 'uSharpness', uniform(sharpness)),
+    uWispiness: assignUniform(material, 'uWispiness', uniform(wispiness)),
+    uScale: assignUniform(material, 'uScale', uniform(0.006)),
+    uScroll: assignUniform(material, 'uScroll', uniform(new THREE.Vector2())),
+    uTime: assignUniform(material, 'uTime', uniform(0)),
     uSunDirection: assignUniform(material, 'uSunDirection', uniform(new THREE.Vector3(...DEFAULT_SUN_POSITION).normalize())),
     uSunColor: assignUniform(material, 'uSunColor', uniform(new THREE.Color(0xfff0d2))),
     uShadowColor: assignUniform(material, 'uShadowColor', uniform(new THREE.Color(0xc9d6e8))),
-    uSkyColor: assignUniform(material, 'uSkyColor', uniform(new THREE.Color(0x9fc4ff))),
-    uGroundColor: assignUniform(material, 'uGroundColor', uniform(new THREE.Color(0xb8a890))),
-    uTime: assignUniform(material, 'uTime', uniform(0)),
-    uPhaseG: assignUniform(material, 'uPhaseG', uniform(0.6)),
-    uQuality: assignUniform(material, 'uQuality', uniform(quality ? 1 : 0)),
-    uDarkness: assignUniform(material, 'uDarkness', uniform(0)),
+    uFogColor: assignUniform(material, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
+    uDarkness: assignUniform(material, 'uDarkness', uniform(darkness)),
+    uRadius: assignUniform(material, 'uRadius', uniform(420)),
   };
 
-  const iSeed = attribute('instanceSeed', 'float');
-  const iFade = attribute('instanceFade', 'float');
-  const iDensity = attribute('instanceDensity', 'float');
-  const iRand = attribute('instanceRand', 'vec4');
-
   material.fragmentNode = Fn(() => {
-    const p = positionLocal;
-    const q = vec3(p.x.mul(0.92 + 0.14).sub(iSeed.mul(0.14).mul(p.x)), p.y.mul(1.12), p.z.mul(0.92).add(iSeed.mul(0.14).mul(p.z)));
-    const ellipsoid = length(q).sub(0.58).sub(iDensity.mul(0.06));
-    const base = oneMinus(nodeSmoothstep(u.uSoftness.mul(0.18).add(0.03).negate(), u.uSoftness.mul(0.18).add(0.03), ellipsoid));
-    const wob = vnoise3Node(p.mul(4.0).add(vec3(iSeed.mul(9.0), iSeed.mul(5.0), u.uTime.mul(0.1))));
-    const dens = nodeClamp(base.mul(0.82).add(wob.mul(0.18)), 0.0, 1.0);
-    If(dens.lessThan(0.002), () => { Discard(); });
+    const rel = positionWorld.xz.sub(cameraPosition.xz);
+    const dist = length(rel);
+    const horizonFade = oneMinus(nodeSmoothstep(u.uRadius.mul(0.58), u.uRadius.mul(0.98), dist));
+    const p = positionWorld.xz.add(u.uScroll).mul(u.uScale);
+    const t = u.uTime.mul(0.015);
+    const n0 = vnoise3Node(vec3(p.x, p.y, t));
+    const wispCoord = vec2(p.x.mul(1.4).add(p.y.mul(0.28)), p.y.mul(5.6).sub(p.x.mul(0.16)));
+    const n1 = vnoise3Node(vec3(wispCoord.x.add(17.0), wispCoord.y.sub(9.0), t.add(4.0)));
+    const n2 = vnoise3Node(vec3(p.x.mul(6.8).sub(31.0), p.y.mul(6.8).add(12.0), t.mul(1.7)));
+    const threshold = mix(0.78, 0.38, nodeClamp(u.uCoverage, 0.0, 1.0));
+    const coarse = n0.mul(0.68).add(n1.mul(mix(0.16, 0.30, u.uWispiness))).add(n2.mul(0.08));
+    const coarseDens = nodeSmoothstep(threshold.sub(0.20), threshold.add(0.16), coarse);
+    const edgeMask = oneMinus(nodeSmoothstep(0.42, 0.96, coarseDens));
+    const eroded = coarse.sub(n2.mul(edgeMask).mul(u.uDetailStrength).mul(0.22));
+    const width = mix(0.22, 0.065, nodeClamp(u.uSharpness, 0.0, 1.0));
+    const dens = nodeSmoothstep(threshold.sub(width), threshold.add(width), eroded);
+    const wisps = nodeSmoothstep(0.24, 0.86, n1.add(n2.mul(0.5)));
+    let alpha = dens.mul(mix(float(0.58).sub(u.uWispiness.mul(0.22)), 1.0, wisps)).mul(horizonFade).mul(u.uOpacity);
+    If(alpha.lessThan(0.002), () => { Discard(); });
 
-    const heightNorm = nodeClamp(p.y.add(0.42).div(0.9), 0.0, 1.0);
-    const n = normalize(vec3(p.x.mul(0.65), p.y.mul(1.1).add(0.12), p.z.mul(0.65)));
     const sunDir = normalize(u.uSunDirection);
     const viewDir = normalize(cameraPosition.sub(positionWorld));
-    const sunFacing = nodeClamp(dot(n, sunDir).mul(0.5).add(0.5), 0.0, 1.0);
-    const sunLit = nodeSmoothstep(0.2, 0.95, sunFacing);
-    const phase = pow(max(dot(viewDir, sunDir), 0.0), 4.0).mul(nodeSmoothstep(0.15, 0.75, dens));
-    const wisp = hash13Node(vec3(positionWorld.x.mul(0.04), positionWorld.z.mul(0.04), iSeed.mul(9.0).add(u.uTime.mul(0.05))));
-    const topFade = mix(1.0, float(0.65).add(wisp.mul(0.25)), nodeSmoothstep(0.45, 0.98, heightNorm));
-    const bellyShadow = mix(0.78, 1.0, nodeSmoothstep(-0.42, -0.20, p.y));
-    const ambient = mix(u.uGroundColor, u.uSkyColor, heightNorm);
-    const selfShadow = mix(0.76, 1.0, heightNorm).mul(mix(0.9, 1.08, sunLit));
-    const shadowTint = u.uShadowColor.mul(mix(1.15, 0.85, iDensity)).mul(mix(1.0, 0.55, u.uDarkness));
-    let col = u.uColor.mul(mix(0.82, 1.14, heightNorm)).mul(float(0.94).add(wisp.mul(0.06)));
-    col = mix(col.mul(shadowTint), col, selfShadow);
-    col = col.add(u.uSunColor.mul(phase).mul(float(0.1).add(heightNorm.mul(0.22))).mul(mix(1.0, 0.4, u.uDarkness)));
-    col = col.add(ambient.mul(0.18).mul(mix(1.0, 0.5, u.uDarkness)));
-    col = col.add(u.uSunColor.mul(pow(sunFacing, 16.0)).mul(heightNorm).mul(0.06));
-    col = mix(col, col.mul(vec3(0.32, 0.36, 0.44)), u.uDarkness.mul(0.85));
-    let alpha = dens.mul(float(0.88).add(wisp.mul(0.12))).mul(topFade).mul(bellyShadow).mul(u.uOpacity).mul(iFade).mul(float(0.6).add(iDensity.mul(0.4)));
-    const fogDepth = length(positionWorld.sub(cameraPosition));
-    const fogFactor = nodeSmoothstep(u.uFogNear, u.uFogFar, fogDepth).mul(u.uFogEnabled);
-    col = mix(col, u.uFogColor, fogFactor);
-    alpha = alpha.mul(oneMinus(fogFactor));
+    const forward = pow(max(dot(viewDir, sunDir), 0.0), 4.0);
+    const topLight = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.15, 1.0);
+    let col = u.uColor.mul(mix(0.72, 1.12, n0)).mul(mix(0.75, 1.12, topLight));
+    col = mix(col.mul(u.uShadowColor), col, mix(0.45, 0.95, wisps));
+    col = col.add(u.uSunColor.mul(forward).mul(0.22).mul(oneMinus(u.uDarkness)));
+    col = mix(col, col.mul(vec3(0.34, 0.38, 0.48)), u.uDarkness.mul(0.85));
+    col = mix(col, u.uFogColor, nodeSmoothstep(u.uRadius.mul(0.48), u.uRadius, dist).mul(0.45));
     return vec4(col, alpha);
   })();
 
   return material;
 }
 
-function createCloudMask({
-  seed = 42,
-  coverage = 0.5,
-  noiseScale = 0.028,
-  noiseOctaves = 5,
-  noiseJitter = 0.08,
-} = {}) {
-  const rng = (() => {
-    let s = seed >>> 0;
-    return () => {
-      s = (s + 0x6d2b79f5) >>> 0;
-      let t = Math.imul(s ^ (s >>> 15), s | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+export class CloudSkyLayer {
+  constructor({ scene, camera, sky = null, ...options } = {}) {
+    this.scene = scene;
+    this.camera = camera;
+    this.sky = sky;
+    this.params = normalizeCloudParams(options);
+    this._scroll = new THREE.Vector2();
+    this._mesh = null;
+    this._material = null;
+    this._autoTintColor = new THREE.Color();
+    this._sunColor = new THREE.Color(0xfff0d2);
+    this._shadowColor = new THREE.Color(0xc9d6e8);
+    this._time = 0;
+    this._ready = false;
+  }
+
+  init() {
+    if (!this.scene || !this.camera) throw new Error('metaverse-sky: CloudSkyLayer requires `scene` and `camera`');
+    if (this._ready) return this;
+    this._material = createSkyVolumeCloudMaterial(
+      this.params.cloudColor,
+      this.params.opacity,
+      this.params.coverage,
+      this.params.darkness,
+      this.params.detailStrength,
+      this.params.sharpness,
+      this.params.wispiness,
+    );
+    const size = Math.max(100, this.params.drawDistance * 2);
+    const geo = new THREE.PlaneGeometry(size, size, 1, 1);
+    this._mesh = new THREE.Mesh(geo, this._material);
+    this._mesh.rotation.x = -Math.PI / 2;
+    this._mesh.position.set(this.camera.position.x, this.params.altitude, this.camera.position.z);
+    this._mesh.frustumCulled = false;
+    this._mesh.renderOrder = 2;
+    this.scene.add(this._mesh);
+    this._ready = true;
+    this.applyAtmosphereSettings({});
+    this._syncFog();
+    return this;
+  }
+
+  _syncVisibility() {
+    if (this._mesh) this._mesh.visible = this.params.enabled && this._ready;
+  }
+
+  _syncFog() {
+    const fog = this.scene?.fog;
+    if (fog && this._material) this._material.uniforms.uFogColor.value.copy(fog.color);
+  }
+
+  _syncSunLighting() {
+    if (!this._material) return;
+    const sun = this.sky?.material?.uniforms?.sunPosition?.value ?? new THREE.Vector3(...DEFAULT_SUN_POSITION).normalize();
+    const sunHeight = clamp(sun.y, -0.25, 1);
+    const day = smoothstep(-0.08, 0.22, sunHeight);
+    const warmth = 1 - smoothstep(0.12, 0.62, sunHeight);
+    this._sunColor.setHex(0xffffff).lerp(new THREE.Color(0xffb36f), warmth * 0.55);
+    this._shadowColor.setHex(0x9fb7d5).lerp(new THREE.Color(0xd6e2f2), day * 0.72);
+    const u = this._material.uniforms;
+    u.uSunDirection.value.copy(sun).normalize();
+    u.uSunColor.value.copy(this._sunColor).multiplyScalar(0.35 + day * 0.65);
+    u.uShadowColor.value.copy(this._shadowColor).multiplyScalar(0.75 + day * 0.25);
+  }
+
+  setSunDirection(direction) {
+    if (!this.sky) return this;
+    const d = vectorFrom(direction).normalize();
+    this.sky.material.uniforms.sunPosition.value.copy(d);
+    this._syncSunLighting();
+    return this;
+  }
+
+  setWindDirection(direction) {
+    const vec = Array.isArray(direction) ? direction : [Number(direction?.x) || 0, Number(direction?.y) || 0];
+    const len = Math.hypot(vec[0], vec[1]) || 1;
+    this.params.windDirection = (THREE.MathUtils.radToDeg(Math.atan2(vec[1] / len, vec[0] / len)) % 360 + 360) % 360;
+    return this;
+  }
+
+  setWindSpeed(speed) {
+    this.params.windSpeed = Math.max(0, speed);
+    return this;
+  }
+
+  getAtmosphereSettings() {
+    const p = this.params;
+    return {
+      cloudsEnabled: p.enabled,
+      cloudRenderMode: 'volume',
+      cloudOpacity: p.opacity,
+      cloudAltitude: p.altitude,
+      cloudWindSpeed: p.windSpeed,
+      cloudWindDirection: p.windDirection,
+      cloudTile: p.tile,
+      cloudDrawDistance: p.drawDistance,
+      cloudColor: p.cloudColor.getHex(),
+      cloudAutoTint: p.autoTint,
+      cloudCoverage: p.coverage,
+      cloudNoiseScale: p.noiseScale,
+      cloudDetailStrength: p.detailStrength,
+      cloudSharpness: p.sharpness,
+      cloudWispiness: p.wispiness,
+      cloudDarkness: p.darkness,
     };
-  })();
+  }
 
-  const lattice = new Float32Array(MASK_SIZE * MASK_SIZE);
-  const grad = (ix, iy) => {
-    const h = Math.imul(ix ^ iy, 0x45d9f3b) >>> 0;
-    return (h & 255) / 255;
-  };
-  const smooth = (t) => t * t * (3 - 2 * t);
+  applyAtmosphereSettings(data = {}) {
+    const p = this.params;
+    if (data.cloudsEnabled != null) p.enabled = !!data.cloudsEnabled;
+    if (data.cloudOpacity != null) p.opacity = data.cloudOpacity;
+    if (data.cloudAltitude != null) p.altitude = data.cloudAltitude;
+    if (data.cloudWindSpeed != null) p.windSpeed = data.cloudWindSpeed;
+    if (data.cloudWindDirection != null) p.windDirection = data.cloudWindDirection;
+    if (data.cloudTile != null) p.tile = data.cloudTile;
+    if (data.cloudDrawDistance != null) p.drawDistance = data.cloudDrawDistance;
+    if (data.cloudColor != null) p.cloudColor.set(data.cloudColor);
+    if (data.cloudAutoTint != null) p.autoTint = !!data.cloudAutoTint;
+    if (data.cloudCoverage != null) p.coverage = data.cloudCoverage;
+    if (data.cloudNoiseScale != null) p.noiseScale = data.cloudNoiseScale;
+    if (data.cloudDetailStrength != null) p.detailStrength = data.cloudDetailStrength;
+    if (data.cloudSharpness != null) p.sharpness = data.cloudSharpness;
+    if (data.cloudWispiness != null) p.wispiness = data.cloudWispiness;
+    if (data.cloudDarkness != null) p.darkness = data.cloudDarkness;
+    if (this._material) {
+      const u = this._material.uniforms;
+      u.uOpacity.value = p.opacity;
+      u.uCoverage.value = p.coverage;
+      u.uScale.value = Math.max(0.0005, p.noiseScale * 0.22 * (p.tile / 6));
+      u.uDetailStrength.value = p.detailStrength;
+      u.uSharpness.value = p.sharpness;
+      u.uWispiness.value = p.wispiness;
+      u.uRadius.value = p.drawDistance;
+      u.uDarkness.value = p.darkness;
+      u.uColor.value.copy(p.cloudColor);
+    }
+    if (this._mesh) {
+      const size = Math.max(100, p.drawDistance * 2);
+      this._mesh.geometry.dispose();
+      this._mesh.geometry = new THREE.PlaneGeometry(size, size, 1, 1);
+      this._mesh.position.set(this.camera.position.x, p.altitude, this.camera.position.z);
+    }
+    this._syncVisibility();
+    this._syncSunLighting();
+    return this;
+  }
 
-  const vnoise = (x, y) => {
-    const x0 = Math.floor(x);
-    const y0 = Math.floor(y);
-    const tx = smooth(x - x0);
-    const ty = smooth(y - y0);
-    const a = grad(x0, y0);
-    const b = grad(x0 + 1, y0);
-    const c = grad(x0, y0 + 1);
-    const d = grad(x0 + 1, y0 + 1);
-    return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
-  };
+  update(dt) {
+    if (!this._ready || !this.params.enabled) return;
+    this._time += dt;
+    const p = this.params;
+    const wind = p.windDirection * Math.PI / 180;
+    this._scroll.x += Math.cos(wind) * p.windSpeed * dt * 60;
+    this._scroll.y += Math.sin(wind) * p.windSpeed * dt * 60;
+    this._mesh.position.set(this.camera.position.x, p.altitude, this.camera.position.z);
+    const u = this._material.uniforms;
+    u.uScroll.value.copy(this._scroll);
+    u.uTime.value = this._time;
+    this._syncFog();
+    this._syncSunLighting();
 
-  for (let y = 0; y < MASK_SIZE; y += 1) {
-    for (let x = 0; x < MASK_SIZE; x += 1) {
-      let v = 0;
-      let amp = 0.55;
-      let freq = noiseScale;
-      const octaves = Math.max(1, Math.min(7, Math.round(noiseOctaves)));
-      for (let o = 0; o < octaves; o += 1) {
-        v += amp * vnoise(x * freq + seed * 0.01, y * freq + seed * 0.013);
-        freq *= 1.95;
-        amp *= 0.52;
-      }
-      lattice[y * MASK_SIZE + x] = v;
+    if (this.sky && p.autoTint) {
+      const sunY = this.sky.material.uniforms.sunPosition.value.y;
+      const day = smoothstep(-0.06, 0.28, sunY);
+      const goldenHour = 1 - smoothstep(0.08, 0.62, Math.max(0, sunY));
+      this._autoTintColor.setRGB(
+        0.72 + day * 0.22 + goldenHour * 0.06,
+        0.78 + day * 0.17 + goldenHour * 0.02,
+        0.9 + day * 0.08 - goldenHour * 0.05,
+      );
+      u.uColor.value.copy(this._autoTintColor);
     }
   }
 
-  const data = new Uint8Array(MASK_SIZE * MASK_SIZE);
-  for (let i = 0; i < data.length; i += 1) {
-    const n = lattice[i] + (rng() - 0.5) * noiseJitter;
-    data[i] = n > coverage ? 255 : 0;
-  }
-  return data;
-}
-
-function createMaskDensity(mask) {
-  const out = new Uint8Array(MASK_SIZE * MASK_SIZE);
-  const weights = [
-    [0, 0, 3],
-    [1, 0, 2], [-1, 0, 2], [0, 1, 2], [0, -1, 2],
-    [1, 1, 1], [-1, 1, 1], [1, -1, 1], [-1, -1, 1],
-    [2, 0, 1], [-2, 0, 1], [0, 2, 1], [0, -2, 1],
-  ];
-  const maxWeight = 15;
-  for (let y = 0; y < MASK_SIZE; y += 1) {
-    for (let x = 0; x < MASK_SIZE; x += 1) {
-      let sum = 0;
-      for (const [ox, oy, w] of weights) {
-        const sx = floorMod(x + ox, MASK_SIZE);
-        const sy = floorMod(y + oy, MASK_SIZE);
-        if (mask[sy * MASK_SIZE + sx] >= 24) sum += w;
-      }
-      out[y * MASK_SIZE + x] = Math.round((sum / maxWeight) * 255);
+  dispose() {
+    if (this._mesh) {
+      this.scene?.remove(this._mesh);
+      this._mesh.geometry.dispose();
     }
+    this._material?.dispose();
+    this._mesh = null;
+    this._material = null;
+    this._ready = false;
   }
-  return out;
-}
-
-function cellHash(u, v, salt = 0) {
-  let h = Math.imul((u + salt * 17) ^ (v + salt * 31), 0x45d9f3b) >>> 0;
-  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
-  return (h & 0xffff) / 0xffff;
 }
 
 export function sunDirectionFromAngles(elevation, azimuth) {
@@ -547,445 +624,6 @@ export function hidePanel(panel) {
 
 export function isPanelOpen(panel) {
   return panel?.dataset.open === '1' || panel?.classList.contains('is-visible');
-}
-
-export class CloudLayer {
-  constructor({ scene, camera, sky = null, ...options } = {}) {
-    this.scene = scene;
-    this.camera = camera;
-    this.sky = sky;
-    this.params = normalizeCloudParams(options);
-    this._mask = null;
-    this._maskDensity = null;
-    this._scroll = new THREE.Vector2(0, 0);
-    this._layers = [];
-    this._piece = 12;
-    this._radius = 75;
-    this._maxInstances = (this._radius * 2 + 1) ** 2;
-    this._lastCell = { x: NaN, z: NaN, sx: NaN, sz: NaN };
-    this._dummy = new THREE.Object3D();
-    this._sunColor = new THREE.Color();
-    this._shadowColor = new THREE.Color();
-    this._sunWarmColor = new THREE.Color(0xffb36f);
-    this._shadowDayColor = new THREE.Color(0xd6e2f2);
-    this._autoTintColor = new THREE.Color();
-    this._skyColor = new THREE.Color();
-    this._groundColor = new THREE.Color();
-    this._skyDayColor = new THREE.Color(0x9fc4ff);
-    this._skyNightColor = new THREE.Color(0x1a2540);
-    this._groundDayColor = new THREE.Color(0xb8a890);
-    this._groundNightColor = new THREE.Color(0x2a2630);
-    this._time = 0;
-    this._ready = false;
-  }
-
-  init() {
-    if (!this.scene || !this.camera) {
-      throw new Error('metaverse-sky: CloudLayer requires `scene` and `camera`');
-    }
-    if (this._ready) return this;
-    this._regenMask();
-    this._applyPieceSize();
-
-    for (let li = 0; li < CLOUD_LAYERS.length; li += 1) {
-      const layer = CLOUD_LAYERS[li];
-      const mat = createPuffMaterial(
-        this.params.cloudColor,
-        this.params.opacity * layer.opacityMul,
-        this.params.roundness,
-        this.params.softness,
-        this.params.quality,
-      );
-
-      const geo = new THREE.BoxGeometry(1, 1, 1);
-      geo.setAttribute(
-        'instanceSeed',
-        new THREE.InstancedBufferAttribute(new Float32Array(this._maxInstances), 1),
-      );
-      geo.setAttribute(
-        'instanceFade',
-        new THREE.InstancedBufferAttribute(new Float32Array(this._maxInstances), 1),
-      );
-      geo.setAttribute(
-        'instanceDensity',
-        new THREE.InstancedBufferAttribute(new Float32Array(this._maxInstances), 1),
-      );
-      geo.setAttribute(
-        'instanceRand',
-        new THREE.InstancedBufferAttribute(new Float32Array(this._maxInstances * 4), 4),
-      );
-
-      const mesh = new THREE.InstancedMesh(geo, mat, this._maxInstances);
-      mesh.count = 0;
-      mesh.frustumCulled = false;
-      mesh.renderOrder = 2 + li;
-      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-
-      const group = new THREE.Group();
-      group.add(mesh);
-      this.scene.add(group);
-
-      this._layers.push({ layer, group, mesh, material: mat });
-    }
-
-    this._ready = true;
-    this._syncVisibility();
-    this._syncFog();
-    this._syncSunLighting();
-    this._updateGroupPositions(this.camera.position);
-    this._rebuildAll(true);
-    return this;
-  }
-
-  _applyPieceSize() {
-    this._piece = 12 * (6 / Math.max(3, this.params.tile));
-    this._radius = Math.min(75, Math.ceil((this.camera?.far ?? 900) / this._piece) + 2);
-    this._maxInstances = (this._radius * 2 + 1) ** 2;
-  }
-
-  _syncVisibility() {
-    const on = this.params.enabled && this._ready;
-    for (const { group } of this._layers) group.visible = on;
-  }
-
-  _applyColors() {
-    for (const { material } of this._layers) material.uniforms.uColor.value.copy(this.params.cloudColor);
-  }
-
-  _applyOpacity() {
-    const p = this.params;
-    for (const { layer, material } of this._layers) material.uniforms.uOpacity.value = p.opacity * layer.opacityMul;
-  }
-
-  _applyShaderStyle() {
-    const p = this.params;
-    const desiredSide = p.quality ? THREE.DoubleSide : THREE.FrontSide;
-    for (const { material } of this._layers) {
-      material.uniforms.uRoundness.value = p.roundness;
-      material.uniforms.uSoftness.value = p.softness;
-      material.uniforms.uQuality.value = p.quality ? 1 : 0;
-      material.uniforms.uDarkness.value = p.darkness;
-      if (material.side !== desiredSide) {
-        material.side = desiredSide;
-        material.needsUpdate = true;
-      }
-    }
-  }
-
-  setSunDirection(direction) {
-    if (!this.sky) return this;
-    const d = vectorFrom(direction).normalize();
-    this.sky.material.uniforms.sunPosition.value.copy(d);
-    this._syncSunLighting();
-    return this;
-  }
-
-  setWindDirection(direction) {
-    const vec = Array.isArray(direction)
-      ? direction
-      : [Number(direction?.x) || 0, Number(direction?.y) || 0];
-    const len = Math.hypot(vec[0], vec[1]) || 1;
-    const nx = vec[0] / len;
-    const ny = vec[1] / len;
-    this.params.windDirection = (THREE.MathUtils.radToDeg(Math.atan2(ny, nx)) % 360 + 360) % 360;
-    return this;
-  }
-
-  setWindSpeed(speed) {
-    this.params.windSpeed = Math.max(0, speed);
-    return this;
-  }
-
-  _regenMask() {
-    const p = this.params;
-    this._mask = createCloudMask({
-      seed: p.noiseSeed,
-      coverage: p.coverage,
-      noiseScale: p.noiseScale,
-      noiseOctaves: p.noiseOctaves,
-      noiseJitter: p.noiseJitter,
-    });
-    this._maskDensity = createMaskDensity(this._mask);
-  }
-
-  _syncFog() {
-    const fog = this.scene?.fog;
-    const enabled = fog ? 1 : 0;
-    for (const { material } of this._layers) {
-      const u = material.uniforms;
-      u.uFogEnabled.value = enabled;
-      if (fog) {
-        u.uFogColor.value.copy(fog.color);
-        u.uFogNear.value = fog.near;
-        u.uFogFar.value = fog.far;
-      }
-    }
-  }
-
-  _syncSunLighting() {
-    if (!this.sky) return;
-    const sun = this.sky.material.uniforms.sunPosition.value;
-    const sunHeight = clamp(sun.y, -0.25, 1);
-    const day = smoothstep(-0.08, 0.22, sunHeight);
-    const warmth = 1 - smoothstep(0.12, 0.62, sunHeight);
-    this._sunColor.setHex(0xffffff).lerp(this._sunWarmColor, warmth * 0.55);
-    this._shadowColor.setHex(0x9fb7d5).lerp(this._shadowDayColor, day * 0.72);
-    this._skyColor.copy(this._skyNightColor).lerp(this._skyDayColor, day);
-    this._groundColor.copy(this._groundNightColor).lerp(this._groundDayColor, day * (1 - warmth * 0.3));
-
-    for (const { material } of this._layers) {
-      const u = material.uniforms;
-      u.uSunDirection.value.copy(sun).normalize();
-      u.uSunColor.value.copy(this._sunColor).multiplyScalar(0.35 + day * 0.65);
-      u.uShadowColor.value.copy(this._shadowColor).multiplyScalar(0.75 + day * 0.25);
-      u.uSkyColor.value.copy(this._skyColor).multiplyScalar(0.4 + day * 0.6);
-      u.uGroundColor.value.copy(this._groundColor).multiplyScalar(0.3 + day * 0.7);
-      u.uTime.value = this._time;
-    }
-  }
-
-  _scrollState() {
-    const piece = this._piece;
-    return {
-      cellX: Math.floor(this._scroll.x / piece),
-      cellZ: Math.floor(this._scroll.y / piece),
-      fracX: this._scroll.x - Math.floor(this._scroll.x / piece) * piece,
-      fracZ: this._scroll.y - Math.floor(this._scroll.y / piece) * piece,
-    };
-  }
-
-  _needsRebuild(cam) {
-    const piece = this._piece;
-    const cellX = Math.floor(cam.x / piece);
-    const cellZ = Math.floor(cam.z / piece);
-    const s = this._scrollState();
-    const last = this._lastCell;
-    if (cellX !== last.x || cellZ !== last.z || s.cellX !== last.sx || s.cellZ !== last.sz) {
-      last.x = cellX;
-      last.z = cellZ;
-      last.sx = s.cellX;
-      last.sz = s.cellZ;
-      return true;
-    }
-    return false;
-  }
-
-  _groupOrigin(cam) {
-    const piece = this._piece;
-    const cellX = Math.floor(cam.x / piece);
-    const cellZ = Math.floor(cam.z / piece);
-    const s = this._scrollState();
-    return {
-      x: cellX * piece - s.fracX,
-      z: cellZ * piece - s.fracZ,
-      cellX,
-      cellZ,
-      scrollGX: s.cellX,
-      scrollGZ: s.cellZ,
-    };
-  }
-
-  _rebuildLayer(layerState, cam) {
-    const { layer, mesh } = layerState;
-    const piece = this._piece;
-    const radius = this._radius;
-    const mask = this._mask;
-    const density = this._maskDensity;
-    const g = this._groupOrigin(cam);
-    const seeds = mesh.geometry.getAttribute('instanceSeed');
-    const fades = mesh.geometry.getAttribute('instanceFade');
-    const densAttr = mesh.geometry.getAttribute('instanceDensity');
-    const rands = mesh.geometry.getAttribute('instanceRand');
-    const fadeStart = Math.max(1, radius - Math.max(6, Math.min(14, radius * 0.16)));
-    let count = 0;
-
-    for (let dz = -radius; dz <= radius; dz += 1) {
-      for (let dx = -radius; dx <= radius; dx += 1) {
-        const radial = Math.hypot(dx + 0.5, dz + 0.5);
-        if (radial > radius + 0.35) continue;
-
-        const tu = floorMod(g.cellX + dx + g.scrollGX + layer.phaseU, MASK_SIZE);
-        const tv = floorMod(g.cellZ + dz + g.scrollGZ + layer.phaseV, MASK_SIZE);
-        const idx = tv * MASK_SIZE + tu;
-        if (mask[idx] < 24) continue;
-
-        const localDensity = density[idx] / 255;
-        if (localDensity < 0.2 && cellHash(tu, tv, layer.phaseU + 11) > 0.35) continue;
-
-        const h0 = cellHash(tu, tv, layer.phaseU);
-        const h1 = cellHash(tu, tv, layer.phaseV + 3);
-        const h2 = cellHash(tu, tv, layer.phaseU + layer.phaseV);
-        const h3 = cellHash(tu, tv, layer.phaseU + layer.phaseV + 19);
-        const edgeFade = smoothstep(radius + 0.35, fadeStart, radial);
-        const densityFade = smoothstep(0.06, 0.72, localDensity);
-        const instanceFade = edgeFade * (0.46 + densityFade * 0.54);
-        if (instanceFade <= 0.015) continue;
-
-        const wx = (g.cellX + dx) * piece + piece * (0.42 + h0 * 0.16);
-        const wz = (g.cellZ + dz) * piece + piece * (0.42 + h1 * 0.16);
-        const scale = this.params.puffScale;
-        const layerLift = this.params.layerHeight;
-        const mass = 0.82 + densityFade * 0.24;
-        const sx = piece * (3.65 + h0 * 1.18 + h3 * 0.35) * scale * mass;
-        const sy = layer.thickness * layerLift * (1.68 + h2 * 0.95 + densityFade * 0.24) * scale;
-        const sz = piece * (3.3 + h1 * 1.18 + (1 - h3) * 0.28) * scale * mass;
-
-        this._dummy.position.set(
-          wx - g.x,
-          this.params.altitude + layer.yOff * layerLift + sy * 0.5,
-          wz - g.z,
-        );
-        this._dummy.rotation.set(0, 0, 0);
-        this._dummy.scale.set(sx, sy, sz);
-        this._dummy.updateMatrix();
-        mesh.setMatrixAt(count, this._dummy.matrix);
-        seeds.setX(count, h2);
-        fades.setX(count, instanceFade);
-        densAttr.setX(count, localDensity);
-        rands.setXYZW(
-          count,
-          cellHash(tu, tv, layer.phaseU + 7),
-          cellHash(tu, tv, layer.phaseV + 13),
-          cellHash(tu, tv, layer.phaseU + layer.phaseV + 23),
-          cellHash(tu, tv, layer.phaseU * 2 + 5),
-        );
-        count += 1;
-        if (count >= this._maxInstances) break;
-      }
-      if (count >= this._maxInstances) break;
-    }
-
-    mesh.count = count;
-    mesh.instanceMatrix.needsUpdate = true;
-    seeds.needsUpdate = true;
-    fades.needsUpdate = true;
-    densAttr.needsUpdate = true;
-    rands.needsUpdate = true;
-  }
-
-  _rebuildAll(force = false) {
-    if (!this._ready) return;
-    const cam = this.camera.position;
-    if (!force && !this._needsRebuild(cam)) return;
-    for (const layerState of this._layers) this._rebuildLayer(layerState, cam);
-  }
-
-  _updateGroupPositions(cam) {
-    const g = this._groupOrigin(cam);
-    for (const { group } of this._layers) group.position.set(g.x, 0, g.z);
-  }
-
-  getAtmosphereSettings() {
-    const p = this.params;
-    return {
-      cloudsEnabled: p.enabled,
-      cloudOpacity: p.opacity,
-      cloudAltitude: p.altitude,
-      cloudWindSpeed: p.windSpeed,
-      cloudWindDirection: p.windDirection,
-      cloudTile: p.tile,
-      cloudColor: p.cloudColor.getHex(),
-      cloudAutoTint: p.autoTint,
-      cloudPuffScale: p.puffScale,
-      cloudLayerHeight: p.layerHeight,
-      cloudCoverage: p.coverage,
-      cloudNoiseSeed: p.noiseSeed,
-      cloudNoiseScale: p.noiseScale,
-      cloudNoiseOctaves: p.noiseOctaves,
-      cloudNoiseJitter: p.noiseJitter,
-      cloudRoundness: p.roundness,
-      cloudSoftness: p.softness,
-      cloudDarkness: p.darkness,
-      cloudQuality: p.quality,
-    };
-  }
-
-  applyAtmosphereSettings(data = {}) {
-    const p = this.params;
-    const prevNoise = {
-      seed: p.noiseSeed,
-      coverage: p.coverage,
-      noiseScale: p.noiseScale,
-      noiseOctaves: p.noiseOctaves,
-      noiseJitter: p.noiseJitter,
-    };
-
-    if (data.cloudsEnabled != null) p.enabled = !!data.cloudsEnabled;
-    if (data.cloudOpacity != null) p.opacity = data.cloudOpacity;
-    if (data.cloudAltitude != null) p.altitude = data.cloudAltitude;
-    if (data.cloudWindSpeed != null) p.windSpeed = data.cloudWindSpeed;
-    if (data.cloudWindDirection != null) p.windDirection = data.cloudWindDirection;
-    if (data.cloudTile != null) p.tile = data.cloudTile;
-    if (data.cloudColor != null) p.cloudColor.set(data.cloudColor);
-    if (data.cloudAutoTint != null) p.autoTint = !!data.cloudAutoTint;
-    if (data.cloudPuffScale != null) p.puffScale = data.cloudPuffScale;
-    if (data.cloudLayerHeight != null) p.layerHeight = data.cloudLayerHeight;
-    if (data.cloudCoverage != null) p.coverage = data.cloudCoverage;
-    if (data.cloudNoiseSeed != null) p.noiseSeed = data.cloudNoiseSeed;
-    if (data.cloudNoiseScale != null) p.noiseScale = data.cloudNoiseScale;
-    if (data.cloudNoiseOctaves != null) p.noiseOctaves = data.cloudNoiseOctaves;
-    if (data.cloudNoiseJitter != null) p.noiseJitter = data.cloudNoiseJitter;
-    if (data.cloudRoundness != null) p.roundness = data.cloudRoundness;
-    if (data.cloudSoftness != null) p.softness = data.cloudSoftness;
-    if (data.cloudDarkness != null) p.darkness = data.cloudDarkness;
-    if (data.cloudQuality != null) p.quality = data.cloudQuality;
-
-    const noiseChanged = prevNoise.seed !== p.noiseSeed
-      || prevNoise.coverage !== p.coverage
-      || prevNoise.noiseScale !== p.noiseScale
-      || prevNoise.noiseOctaves !== p.noiseOctaves
-      || prevNoise.noiseJitter !== p.noiseJitter;
-    if (noiseChanged) this._regenMask();
-
-    this._applyPieceSize();
-    this._applyOpacity();
-    this._applyColors();
-    this._applyShaderStyle();
-    this._syncVisibility();
-    this._lastCell = { x: NaN, z: NaN, sx: NaN, sz: NaN };
-    this._rebuildAll(true);
-    return this;
-  }
-
-  update(dt) {
-    if (!this._ready || !this._layers.length || !this.params.enabled) return;
-
-    this._time += dt;
-    const p = this.params;
-    const cam = this.camera.position;
-    const wind = p.windDirection * Math.PI / 180;
-
-    this._scroll.x += Math.cos(wind) * p.windSpeed * dt;
-    this._scroll.y += Math.sin(wind) * p.windSpeed * dt;
-
-    this._updateGroupPositions(cam);
-    this._rebuildAll(false);
-    this._syncFog();
-    this._syncSunLighting();
-
-    if (this.sky && p.autoTint) {
-      const sunY = this.sky.material.uniforms.sunPosition.value.y;
-      const day = smoothstep(-0.06, 0.28, sunY);
-      const goldenHour = 1 - smoothstep(0.08, 0.62, Math.max(0, sunY));
-      const tint = this._autoTintColor;
-      tint.setRGB(
-        0.72 + day * 0.22 + goldenHour * 0.06,
-        0.78 + day * 0.17 + goldenHour * 0.02,
-        0.9 + day * 0.08 - goldenHour * 0.05,
-      );
-      for (const { material } of this._layers) material.uniforms.uColor.value.copy(tint);
-    }
-  }
-
-  dispose() {
-    for (const { group, mesh, material } of this._layers) {
-      this.scene?.remove(group);
-      mesh.geometry.dispose();
-      material.dispose();
-    }
-    this._layers = [];
-    this._ready = false;
-  }
 }
 
 const PRECIP_DEFAULTS = {
@@ -1365,7 +1003,7 @@ export class MetaverseSky {
     setSkySun(this.sky, { elevation: this.elevation, azimuth: this.azimuth, light: this.light, lightDistance: this.lightDistance });
 
     this.clouds = clouds
-      ? new CloudLayer({ scene, camera, sky: this.sky, ...cloudOptions }).init()
+      ? new CloudSkyLayer({ scene, camera, sky: this.sky, ...cloudOptions }).init()
       : null;
     this.precipitation = precipitation
       ? new Precipitation({ scene, camera, sky: this.sky, ...precipitationOptions }).init()
@@ -1630,23 +1268,14 @@ export class SkyEditor {
     this._section('Clouds');
     this._checkbox('Enabled', p.enabled, (on) => c.applyAtmosphereSettings({ cloudsEnabled: on }));
     this._slider('Opacity', 0, 1, 0.01, p.opacity, (v) => c.applyAtmosphereSettings({ cloudOpacity: v }));
-    this._slider('Altitude (m)', 55, 140, 1, p.altitude, (v) => c.applyAtmosphereSettings({ cloudAltitude: v }));
+    this._slider('Altitude (m)', 55, 220, 1, p.altitude, (v) => c.applyAtmosphereSettings({ cloudAltitude: v }));
+    this._slider('Draw distance (m)', 120, 900, 10, p.drawDistance, (v) => c.applyAtmosphereSettings({ cloudDrawDistance: v }));
     this._slider('Tiling', 3, 10, 0.5, p.tile, (v) => c.applyAtmosphereSettings({ cloudTile: v }));
-
-    this._section('Cloud shape');
-    this._checkbox('High quality (volumetric)', p.quality > 0, (on) => c.applyAtmosphereSettings({ cloudQuality: on ? 1 : 0 }));
-    this._slider('Puff scale', 0.5, 2, 0.05, p.puffScale, (v) => c.applyAtmosphereSettings({ cloudPuffScale: v }));
-    this._slider('Layer height', 0.5, 2, 0.05, p.layerHeight, (v) => c.applyAtmosphereSettings({ cloudLayerHeight: v }));
-    this._slider('Corner roundness', 0.05, 0.35, 0.01, p.roundness, (v) => c.applyAtmosphereSettings({ cloudRoundness: v }));
-    this._slider('Edge softness', 0, 1, 0.01, p.softness, (v) => c.applyAtmosphereSettings({ cloudSoftness: v }));
     this._slider('Darkness', 0, 1, 0.01, p.darkness, (v) => c.applyAtmosphereSettings({ cloudDarkness: v }));
 
     this._section('Cloud noise');
-    this._slider('Coverage', 0.2, 0.8, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
+    this._slider('Coverage', 0.2, 0.9, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
     this._slider('Pattern scale', 0.01, 0.08, 0.001, p.noiseScale, (v) => c.applyAtmosphereSettings({ cloudNoiseScale: v }));
-    this._slider('Detail (octaves)', 3, 7, 1, p.noiseOctaves, (v) => c.applyAtmosphereSettings({ cloudNoiseOctaves: v }));
-    this._slider('Jitter', 0, 0.2, 0.005, p.noiseJitter, (v) => c.applyAtmosphereSettings({ cloudNoiseJitter: v }));
-    this._slider('Seed', 0, 999, 1, p.noiseSeed, (v) => c.applyAtmosphereSettings({ cloudNoiseSeed: v }));
 
     this._section('Cloud wind');
     this._slider('Speed', 0, 0.15, 0.001, p.windSpeed, (v) => c.applyAtmosphereSettings({ cloudWindSpeed: v }));
