@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MetaverseSky, DEFAULT_CLOUD_SETTINGS } from 'metaverse-sky';
 
@@ -73,7 +73,8 @@ scene.fog = new THREE.Fog(0x9fb7d5, 300, 700);
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 900);
 camera.position.set(52, 42, 96);
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
+await renderer.init();
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;

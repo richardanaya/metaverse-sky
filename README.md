@@ -1,6 +1,6 @@
 # metaverse-sky
 
-Three.js sky and atmosphere library with Preetham atmospheric scattering, sun helpers, IBL intensity syncing, a procedural voxel cloud deck, precipitation (rain/snow/hail), and an optional sky editor panel.
+Three.js WebGPU/TSL sky and atmosphere library with an analytic atmospheric dome, sun helpers, IBL intensity syncing, a procedural voxel cloud deck, precipitation (rain/snow/hail), and an optional sky editor panel.
 
 ## Install
 
@@ -8,7 +8,7 @@ Three.js sky and atmosphere library with Preetham atmospheric scattering, sun he
 npm install metaverse-sky three
 ```
 
-Requires `three` >= 0.160 as a peer dependency.
+Requires `three` >= 0.160 as a peer dependency. Rendering uses Three.js Shading Language (TSL), so apps should use `WebGPURenderer` from `three/webgpu`.
 
 ## CDN Import Map
 
@@ -17,6 +17,8 @@ Requires `three` >= 0.160 as a peer dependency.
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three/build/three.module.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three/build/three.tsl.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three/examples/jsm/",
     "metaverse-sky": "https://cdn.jsdelivr.net/npm/metaverse-sky/index.js"
   }
@@ -27,12 +29,13 @@ Requires `three` >= 0.160 as a peer dependency.
 ## Minimal Usage
 
 ```js
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { MetaverseSky } from 'metaverse-sky';
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 900);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+await renderer.init();
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.6;
 

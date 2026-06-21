@@ -1,11 +1,16 @@
 /**
- * metaverse-sky - Three.js Preetham sky, sun helpers, and procedural voxel clouds.
+ * metaverse-sky - Three.js WebGPU/TSL sky, sun helpers, and procedural voxel clouds.
  *
  * Peer dependency: the host app must resolve `three` and `three/addons/`.
  */
 
-import * as THREE from 'three';
-import { Sky } from 'three/addons/objects/Sky.js';
+import * as THREE from 'three/webgpu';
+import {
+  Fn, uniform, texture, attribute,
+  vec2, vec3, vec4, float, int,
+  abs, max, min, mix, clamp as nodeClamp, smoothstep as nodeSmoothstep, dot, normalize, length, pow, exp, sin, sqrt, fract, floor, oneMinus,
+  If, Loop, Discard, positionLocal, positionWorld, cameraPosition, uv,
+} from 'three/tsl';
 
 export const DEFAULT_SKY_SCALE = 450;
 export const DEFAULT_TURBIDITY = 8;
@@ -71,257 +76,6 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
   darkness: CLOUD_DEFAULTS.darkness,
 });
 
-const PUFF_VERT = /* glsl */`
-  attribute float instanceSeed;
-  attribute float instanceFade;
-  attribute float instanceDensity;
-  attribute vec4 instanceRand;
-
-  uniform vec3 uSunDirection;
-
-  varying vec3 vLocalPos;
-  varying vec3 vWorldPos;
-  varying vec3 vInvScale;
-  varying vec3 vLocalSunDir;
-  varying float vSeed;
-  varying float vFade;
-  varying float vDensity;
-  varying vec4 vRand;
-
-  void main() {
-    vLocalPos = position;
-    vSeed = instanceSeed;
-    vFade = instanceFade;
-    vDensity = instanceDensity;
-    vRand = instanceRand;
-
-    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
-    vWorldPos = worldPos.xyz;
-
-    mat3 m = mat3(instanceMatrix);
-    vec3 scl = vec3(m[0][0], m[1][1], m[2][2]);
-    vInvScale = 1.0 / scl;
-    vLocalSunDir = normalize(uSunDirection * vInvScale);
-
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
-  }
-`;
-
-const PUFF_FRAG = /* glsl */`
-  uniform vec3 uColor;
-  uniform float uOpacity;
-  uniform float uRoundness;
-  uniform float uSoftness;
-  uniform vec3 uFogColor;
-  uniform float uFogNear;
-  uniform float uFogFar;
-  uniform float uFogEnabled;
-  uniform vec3 uSunDirection;
-  uniform vec3 uSunColor;
-  uniform vec3 uShadowColor;
-  uniform vec3 uSkyColor;
-  uniform vec3 uGroundColor;
-  uniform float uTime;
-  uniform float uPhaseG;
-  uniform float uQuality;
-  uniform float uDarkness;
-
-  varying vec3 vLocalPos;
-  varying vec3 vWorldPos;
-  varying vec3 vInvScale;
-  varying vec3 vLocalSunDir;
-  varying float vSeed;
-  varying float vFade;
-  varying float vDensity;
-  varying vec4 vRand;
-
-  const float BASE_Y = -0.42;
-  const float TOP_Y = 0.48;
-
-  float hash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-  }
-
-  float vnoise3(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float n000 = hash13(i);
-    float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
-    float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
-    float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
-    float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
-    float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
-    float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
-    float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
-    return mix(
-      mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
-      mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
-      f.z
-    );
-  }
-
-  float sdRoundBox(vec3 p, vec3 halfSize, float cornerR) {
-    vec3 q = abs(p) - halfSize + cornerR;
-    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - cornerR;
-  }
-
-  float smin(float a, float b, float k) {
-    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return mix(b, a, h) - h * (1.0 - h) * k;
-  }
-
-  float mapSDFCore(vec3 p) {
-    p.x *= 0.92 + vSeed * 0.14;
-    p.z *= 0.92 + (1.0 - vSeed) * 0.14;
-
-    float cornerR = uRoundness + vSeed * 0.04;
-
-    vec3 halfSize = vec3(0.44, 0.32 + vSeed * 0.05, 0.44);
-    vec3 bodyCenter = vec3(0.0, 0.05, 0.0);
-    float body = sdRoundBox(p - bodyCenter, halfSize, cornerR) - vDensity * 0.03;
-
-    vec3 domeCenter = vec3(0.0, -0.15, 0.0);
-    float dome = length(vec3(p.xz * 1.1, p.y - domeCenter.y)) - 0.38;
-
-    float lobeR = max(0.05, cornerR * 0.7);
-    vec3 o1 = vec3(0.16 * (vSeed - 0.5), 0.12, 0.14 * (vRand.x - 0.5));
-    vec3 o2 = vec3(-0.18 * (vRand.y - 0.5), 0.22, 0.12 * (vSeed - 0.35));
-    vec3 o3 = vec3(0.1 * (vRand.z - 0.5), 0.32, -0.15 * (vRand.w - 0.5));
-    vec3 o4 = vec3(0.05 * (vRand.x + vRand.z - 1.0) * 0.5, 0.40, 0.07 * (vRand.y + vRand.w - 1.0) * 0.5);
-    float l1 = sdRoundBox(p - o1, vec3(0.26, 0.22, 0.26), lobeR);
-    float l2 = sdRoundBox(p - o2, vec3(0.23, 0.20, 0.23), lobeR * 0.92);
-    float l3 = sdRoundBox(p - o3, vec3(0.20, 0.18, 0.20), lobeR * 0.84);
-    float l4 = sdRoundBox(p - o4, vec3(0.16, 0.15, 0.16), lobeR * 0.76);
-
-    float k = 0.10 + uSoftness * 0.08;
-    float towers = smin(smin(smin(l1, l2, k), l3, k), l4, k) - vDensity * 0.04;
-    return smin(smin(body, dome, k * 1.3), towers, k);
-  }
-
-  float mapSDF(vec3 p) {
-    float shape = mapSDFCore(p);
-    if (uQuality > 0.5) {
-      float wob = vnoise3(p * 4.0 + vec3(vSeed * 9.0, vSeed * 5.0, uTime * 0.1));
-      shape += (wob - 0.5) * 0.06;
-    }
-    return shape;
-  }
-
-  float densityFast(vec3 p) {
-    float d = mapSDFCore(p);
-    float edge = uSoftness * 0.16 + 0.04;
-    return 1.0 - smoothstep(-edge, edge, d);
-  }
-
-  float densityQuality(vec3 p) {
-    float d = mapSDF(p);
-    float edge = max(fwidth(d) * 1.5, uSoftness * 0.16 + 0.04);
-    return 1.0 - smoothstep(-edge, edge, d);
-  }
-
-  float shadowOcc(vec3 p) {
-    float d = mapSDFCore(p);
-    return 1.0 - smoothstep(-0.1, 0.1, d);
-  }
-
-  vec3 analyticNormal(vec3 p) {
-    return normalize(vec3(p.x * 0.65, p.y * 1.1 + 0.12, p.z * 0.65));
-  }
-
-  vec3 tetraNormal(vec3 p) {
-    const float e = 0.015;
-    return normalize(
-      mapSDFCore(p + vec3(e, -e, -e)) * vec3(1.0, -1.0, -1.0) +
-      mapSDFCore(p + vec3(-e, e, -e)) * vec3(-1.0, 1.0, -1.0) +
-      mapSDFCore(p + vec3(-e, -e, e)) * vec3(-1.0, -1.0, 1.0) +
-      mapSDFCore(p + vec3(e, e, e)) * vec3(1.0, 1.0, 1.0)
-    );
-  }
-
-  float henyeyGreenstein(float cosTheta, float g) {
-    float g2 = g * g;
-    return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
-  }
-
-  void main() {
-    vec3 p = vLocalPos;
-    float dens = densityFast(p);
-    if (dens < 0.002) discard;
-
-    float volDens = dens;
-    if (uQuality > 0.5) {
-      vec3 viewDirWorld = normalize(cameraPosition - vWorldPos);
-      vec3 viewDirLocal = normalize(viewDirWorld * vInvScale);
-      volDens = 0.0;
-      const int STEPS = 6;
-      for (int i = 0; i < STEPS; i += 1) {
-        float t = (float(i) + 0.5) / float(STEPS) - 0.5;
-        vec3 sp = p + viewDirLocal * t * 0.8;
-        volDens += densityQuality(sp);
-      }
-      volDens /= float(STEPS);
-      volDens = clamp(volDens, 0.0, 1.0);
-      dens = volDens;
-    }
-
-    vec3 nLocal = uQuality > 0.5 ? tetraNormal(p) : analyticNormal(p);
-    vec3 n = normalize(nLocal * vInvScale);
-
-    vec3 sunDir = normalize(uSunDirection);
-    vec3 viewDir = normalize(cameraPosition - vWorldPos);
-    float sunFacing = clamp(dot(n, sunDir) * 0.5 + 0.5, 0.0, 1.0);
-    float sunLit = smoothstep(0.2, 0.95, sunFacing);
-
-    float cosTheta = dot(viewDir, sunDir);
-    float phase = henyeyGreenstein(cosTheta, uPhaseG);
-    float rim = phase * smoothstep(0.15, 0.75, dens);
-
-    vec3 localSunDir = normalize(vLocalSunDir);
-    float occ;
-    if (uQuality > 0.5) {
-      occ = 1.0;
-      for (int i = 1; i <= 4; i += 1) {
-        occ -= shadowOcc(p + localSunDir * float(i) * 0.07) * 0.18;
-      }
-    } else {
-      occ = 1.0 - shadowOcc(p + localSunDir * 0.1) * 0.35;
-    }
-    occ = clamp(occ, 0.0, 1.0);
-
-    float wisp = hash13(vec3(vWorldPos.x * 0.04, vWorldPos.z * 0.04, vSeed * 9.0 + uTime * 0.05));
-    float heightNorm = clamp((p.y - BASE_Y) / (TOP_Y - BASE_Y), 0.0, 1.0);
-    float topFade = mix(1.0, 0.65 + wisp * 0.25, smoothstep(0.45, 0.98, heightNorm));
-    float bellyShadow = mix(0.78, 1.0, smoothstep(BASE_Y, BASE_Y + 0.22, p.y));
-
-    vec3 ambient = mix(uGroundColor, uSkyColor, heightNorm);
-    float selfShadow = mix(0.76, 1.0, heightNorm) * mix(0.9, 1.08, sunLit) * (0.55 + occ * 0.45);
-
-    vec3 shadowTint = uShadowColor * mix(1.15, 0.85, vDensity) * mix(1.0, 0.55, uDarkness);
-    vec3 col = uColor * mix(0.82, 1.14, heightNorm) * (0.94 + wisp * 0.06);
-    col = mix(col * shadowTint, col, selfShadow);
-    col += uSunColor * rim * (0.1 + 0.22 * heightNorm) * mix(1.0, 0.4, uDarkness);
-    col += ambient * 0.18 * mix(1.0, 0.5, uDarkness);
-    col *= mix(vec3(0.92, 0.95, 1.04), vec3(1.0), heightNorm);
-    col += uSunColor * pow(sunFacing, 16.0) * heightNorm * 0.06;
-    col = mix(col, col * vec3(0.32, 0.36, 0.44), uDarkness * 0.85);
-
-    float alpha = volDens * (0.88 + wisp * 0.12) * topFade * bellyShadow * uOpacity * vFade;
-    alpha *= 0.6 + vDensity * 0.4;
-
-    if (uFogEnabled > 0.5) {
-      float fogDepth = length(vWorldPos - cameraPosition);
-      float fogFactor = smoothstep(uFogNear, uFogFar, fogDepth);
-      col = mix(col, uFogColor, fogFactor);
-      alpha *= 1.0 - fogFactor;
-    }
-
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
-
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -357,34 +111,126 @@ function normalizeCloudParams(options = {}) {
   };
 }
 
-function createPuffMaterial(color, opacity, roundness, softness, quality) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      uColor: { value: color.clone() },
-      uOpacity: { value: opacity },
-      uRoundness: { value: roundness },
-      uSoftness: { value: softness },
-      uFogColor: { value: new THREE.Color(0x9fb7d5) },
-      uFogNear: { value: 300 },
-      uFogFar: { value: 700 },
-      uFogEnabled: { value: 1 },
-      uSunDirection: { value: new THREE.Vector3(...DEFAULT_SUN_POSITION).normalize() },
-      uSunColor: { value: new THREE.Color(0xfff0d2) },
-      uShadowColor: { value: new THREE.Color(0xc9d6e8) },
-      uSkyColor: { value: new THREE.Color(0x9fc4ff) },
-      uGroundColor: { value: new THREE.Color(0xb8a890) },
-      uTime: { value: 0 },
-      uPhaseG: { value: 0.6 },
-      uQuality: { value: quality ? 1 : 0 },
-      uDarkness: { value: 0 },
+function uniformProxy(node) {
+  return {
+    get value() { return node.value; },
+    set value(next) {
+      if (node.value?.copy && next?.isColor) node.value.copy(next);
+      else if (node.value?.copy && next?.isVector2) node.value.copy(next);
+      else if (node.value?.copy && next?.isVector3) node.value.copy(next);
+      else node.value = next;
     },
-    vertexShader: PUFF_VERT,
-    fragmentShader: PUFF_FRAG,
-    transparent: true,
-    depthWrite: false,
-    side: THREE.FrontSide,
-    extensions: { derivatives: true },
-  });
+  };
+}
+
+function assignUniform(material, name, node) {
+  if (!material.userData.uniforms) material.userData.uniforms = {};
+  material.uniforms = material.userData.uniforms;
+  material.userData.uniforms[name] = uniformProxy(node);
+  return node;
+}
+
+function createSolidTexture(r = 255, g = 255, b = 255, a = 255) {
+  const tex = new THREE.DataTexture(new Uint8Array([r, g, b, a]), 1, 1, THREE.RGBAFormat);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function hash13Node(p) {
+  const q = fract(p.mul(0.1031));
+  const d = dot(q, q.yzx.add(33.33));
+  return fract(q.x.add(q.y).mul(q.z).add(d));
+}
+
+function vnoise3Node(p) {
+  const i = floor(p);
+  let f = fract(p);
+  f = f.mul(f).mul(vec3(3.0).sub(f.mul(2.0)));
+  const n000 = hash13Node(i);
+  const n100 = hash13Node(i.add(vec3(1.0, 0.0, 0.0)));
+  const n010 = hash13Node(i.add(vec3(0.0, 1.0, 0.0)));
+  const n110 = hash13Node(i.add(vec3(1.0, 1.0, 0.0)));
+  const n001 = hash13Node(i.add(vec3(0.0, 0.0, 1.0)));
+  const n101 = hash13Node(i.add(vec3(1.0, 0.0, 1.0)));
+  const n011 = hash13Node(i.add(vec3(0.0, 1.0, 1.0)));
+  const n111 = hash13Node(i.add(vec3(1.0, 1.0, 1.0)));
+  return mix(
+    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+    f.z,
+  );
+}
+
+function createPuffMaterial(color, opacity, roundness, softness, quality) {
+  const material = new THREE.MeshBasicNodeMaterial();
+  material.transparent = true;
+  material.depthWrite = false;
+  material.side = quality ? THREE.DoubleSide : THREE.FrontSide;
+  material.toneMapped = false;
+
+  const u = {
+    uColor: assignUniform(material, 'uColor', uniform(color.clone())),
+    uOpacity: assignUniform(material, 'uOpacity', uniform(opacity)),
+    uRoundness: assignUniform(material, 'uRoundness', uniform(roundness)),
+    uSoftness: assignUniform(material, 'uSoftness', uniform(softness)),
+    uFogColor: assignUniform(material, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
+    uFogNear: assignUniform(material, 'uFogNear', uniform(300)),
+    uFogFar: assignUniform(material, 'uFogFar', uniform(700)),
+    uFogEnabled: assignUniform(material, 'uFogEnabled', uniform(1)),
+    uSunDirection: assignUniform(material, 'uSunDirection', uniform(new THREE.Vector3(...DEFAULT_SUN_POSITION).normalize())),
+    uSunColor: assignUniform(material, 'uSunColor', uniform(new THREE.Color(0xfff0d2))),
+    uShadowColor: assignUniform(material, 'uShadowColor', uniform(new THREE.Color(0xc9d6e8))),
+    uSkyColor: assignUniform(material, 'uSkyColor', uniform(new THREE.Color(0x9fc4ff))),
+    uGroundColor: assignUniform(material, 'uGroundColor', uniform(new THREE.Color(0xb8a890))),
+    uTime: assignUniform(material, 'uTime', uniform(0)),
+    uPhaseG: assignUniform(material, 'uPhaseG', uniform(0.6)),
+    uQuality: assignUniform(material, 'uQuality', uniform(quality ? 1 : 0)),
+    uDarkness: assignUniform(material, 'uDarkness', uniform(0)),
+  };
+
+  const iSeed = attribute('instanceSeed', 'float');
+  const iFade = attribute('instanceFade', 'float');
+  const iDensity = attribute('instanceDensity', 'float');
+  const iRand = attribute('instanceRand', 'vec4');
+
+  material.fragmentNode = Fn(() => {
+    const p = positionLocal;
+    const q = vec3(p.x.mul(0.92 + 0.14).sub(iSeed.mul(0.14).mul(p.x)), p.y.mul(1.12), p.z.mul(0.92).add(iSeed.mul(0.14).mul(p.z)));
+    const ellipsoid = length(q).sub(0.58).sub(iDensity.mul(0.06));
+    const base = oneMinus(nodeSmoothstep(u.uSoftness.mul(0.18).add(0.03).negate(), u.uSoftness.mul(0.18).add(0.03), ellipsoid));
+    const wob = vnoise3Node(p.mul(4.0).add(vec3(iSeed.mul(9.0), iSeed.mul(5.0), u.uTime.mul(0.1))));
+    const dens = nodeClamp(base.mul(0.82).add(wob.mul(0.18)), 0.0, 1.0);
+    If(dens.lessThan(0.002), () => { Discard(); });
+
+    const heightNorm = nodeClamp(p.y.add(0.42).div(0.9), 0.0, 1.0);
+    const n = normalize(vec3(p.x.mul(0.65), p.y.mul(1.1).add(0.12), p.z.mul(0.65)));
+    const sunDir = normalize(u.uSunDirection);
+    const viewDir = normalize(cameraPosition.sub(positionWorld));
+    const sunFacing = nodeClamp(dot(n, sunDir).mul(0.5).add(0.5), 0.0, 1.0);
+    const sunLit = nodeSmoothstep(0.2, 0.95, sunFacing);
+    const phase = pow(max(dot(viewDir, sunDir), 0.0), 4.0).mul(nodeSmoothstep(0.15, 0.75, dens));
+    const wisp = hash13Node(vec3(positionWorld.x.mul(0.04), positionWorld.z.mul(0.04), iSeed.mul(9.0).add(u.uTime.mul(0.05))));
+    const topFade = mix(1.0, float(0.65).add(wisp.mul(0.25)), nodeSmoothstep(0.45, 0.98, heightNorm));
+    const bellyShadow = mix(0.78, 1.0, nodeSmoothstep(-0.42, -0.20, p.y));
+    const ambient = mix(u.uGroundColor, u.uSkyColor, heightNorm);
+    const selfShadow = mix(0.76, 1.0, heightNorm).mul(mix(0.9, 1.08, sunLit));
+    const shadowTint = u.uShadowColor.mul(mix(1.15, 0.85, iDensity)).mul(mix(1.0, 0.55, u.uDarkness));
+    let col = u.uColor.mul(mix(0.82, 1.14, heightNorm)).mul(float(0.94).add(wisp.mul(0.06)));
+    col = mix(col.mul(shadowTint), col, selfShadow);
+    col = col.add(u.uSunColor.mul(phase).mul(float(0.1).add(heightNorm.mul(0.22))).mul(mix(1.0, 0.4, u.uDarkness)));
+    col = col.add(ambient.mul(0.18).mul(mix(1.0, 0.5, u.uDarkness)));
+    col = col.add(u.uSunColor.mul(pow(sunFacing, 16.0)).mul(heightNorm).mul(0.06));
+    col = mix(col, col.mul(vec3(0.32, 0.36, 0.44)), u.uDarkness.mul(0.85));
+    let alpha = dens.mul(float(0.88).add(wisp.mul(0.12))).mul(topFade).mul(bellyShadow).mul(u.uOpacity).mul(iFade).mul(float(0.6).add(iDensity.mul(0.4)));
+    const fogDepth = length(positionWorld.sub(cameraPosition));
+    const fogFactor = nodeSmoothstep(u.uFogNear, u.uFogFar, fogDepth).mul(u.uFogEnabled);
+    col = mix(col, u.uFogColor, fogFactor);
+    alpha = alpha.mul(oneMinus(fogFactor));
+    return vec4(col, alpha);
+  })();
+
+  return material;
 }
 
 function createCloudMask({
@@ -497,14 +343,135 @@ export function createAtmosphereSky({
   mieDirectionalG = DEFAULT_MIE_DIRECTIONAL_G,
   sunPosition = DEFAULT_SUN_POSITION,
 } = {}) {
-  const sky = new Sky();
+  const geometry = new THREE.SphereGeometry(1, 64, 32);
+  const material = new THREE.MeshBasicNodeMaterial();
+  material.side = THREE.BackSide;
+  material.depthWrite = false;
+  material.toneMapped = false;
+
+  const u = {
+    turbidity: assignUniform(material, 'turbidity', uniform(turbidity)),
+    rayleigh: assignUniform(material, 'rayleigh', uniform(rayleigh)),
+    mieCoefficient: assignUniform(material, 'mieCoefficient', uniform(mieCoefficient)),
+    mieDirectionalG: assignUniform(material, 'mieDirectionalG', uniform(mieDirectionalG)),
+    sunPosition: assignUniform(material, 'sunPosition', uniform(vectorFrom(sunPosition).normalize())),
+    up: assignUniform(material, 'up', uniform(new THREE.Vector3(0, 1, 0))),
+  };
+
+  material.fragmentNode = Fn(() => {
+    // Fresh single-scattering sky model inspired by O'Neil/Hillaire, with
+    // Earth-like constants cross-checked against Bruneton. Units are kilometers.
+    // The sky mesh follows the camera, so positionLocal is the view direction.
+    const viewDir = normalize(positionLocal);
+    const sunDir = normalize(u.sunPosition);
+    const sunY = sunDir.y;
+    const day = nodeSmoothstep(-0.10, 0.18, sunY);
+    const twilight = oneMinus(nodeSmoothstep(0.05, 0.45, max(sunY, 0.0))).mul(nodeSmoothstep(-0.22, 0.08, sunY));
+
+    const planetRadius = float(6360.0);
+    const atmosphereRadius = float(6460.0);
+    const cameraHeight = float(1.8 / 1000.0); // 1.8m eye height
+    const origin = vec3(0.0, planetRadius.add(cameraHeight), 0.0);
+
+    const bOuter = dot(origin, viewDir);
+    const cOuter = dot(origin, origin).sub(atmosphereRadius.mul(atmosphereRadius));
+    const hOuter = max(bOuter.mul(bOuter).sub(cOuter), 0.0);
+    let tMax = bOuter.negate().add(sqrt(hOuter));
+
+    const bGround = dot(origin, viewDir);
+    const cGround = dot(origin, origin).sub(planetRadius.mul(planetRadius));
+    const hGround = bGround.mul(bGround).sub(cGround);
+    const tGround = bGround.negate().sub(sqrt(max(hGround, 0.0)));
+    const hitsGround = hGround.greaterThan(0.0).and(tGround.greaterThan(0.0));
+    tMax = hitsGround.select(min(tMax, tGround), tMax);
+
+    const viewSamples = float(12.0);
+    const lightSamples = float(4.0);
+    const segmentLength = tMax.div(viewSamples);
+    const betaRayleigh = vec3(5.802, 13.558, 33.100).mul(0.001).mul(u.rayleigh);
+    const betaMie = vec3(3.996).mul(0.001).mul(u.mieCoefficient.mul(180.0)).mul(nodeClamp(u.turbidity.div(8.0), 0.25, 2.5));
+    const scaleRayleigh = float(8.0);
+    const scaleMie = float(1.2);
+
+    const opticalDepthR = float(0.0).toVar();
+    const opticalDepthM = float(0.0).toVar();
+    const sumR = vec3(0.0).toVar();
+    const sumM = vec3(0.0).toVar();
+    const t = float(0.0).toVar();
+
+    Loop({ start: int(0), end: int(12), type: 'int', name: 'i' }, () => {
+      const sampleT = t.add(segmentLength.mul(0.5));
+      const p = origin.add(viewDir.mul(sampleT));
+      const height = max(length(p).sub(planetRadius), 0.0);
+      const densityR = exp(height.div(scaleRayleigh).negate());
+      const densityM = exp(height.div(scaleMie).negate());
+      opticalDepthR.addAssign(densityR.mul(segmentLength));
+      opticalDepthM.addAssign(densityM.mul(segmentLength));
+
+      const bLight = dot(p, sunDir);
+      const cLight = dot(p, p).sub(atmosphereRadius.mul(atmosphereRadius));
+      const hLight = max(bLight.mul(bLight).sub(cLight), 0.0);
+      const lightLength = bLight.negate().add(sqrt(hLight)).div(lightSamples);
+      const lightDepthR = float(0.0).toVar();
+      const lightDepthM = float(0.0).toVar();
+      const lt = float(0.0).toVar();
+      Loop({ start: int(0), end: int(4), type: 'int', name: 'j' }, () => {
+        const lp = p.add(sunDir.mul(lt.add(lightLength.mul(0.5))));
+        const lh = max(length(lp).sub(planetRadius), 0.0);
+        lightDepthR.addAssign(exp(lh.div(scaleRayleigh).negate()).mul(lightLength));
+        lightDepthM.addAssign(exp(lh.div(scaleMie).negate()).mul(lightLength));
+        lt.addAssign(lightLength);
+      });
+
+      const tau = betaRayleigh.mul(opticalDepthR.add(lightDepthR)).add(betaMie.mul(opticalDepthM.add(lightDepthM)));
+      const attenuation = exp(tau.negate());
+      sumR.addAssign(attenuation.mul(densityR).mul(segmentLength));
+      sumM.addAssign(attenuation.mul(densityM).mul(segmentLength));
+      t.addAssign(segmentLength);
+    });
+
+    const mu = dot(viewDir, sunDir);
+    const mu2 = mu.mul(mu);
+    const rayleighPhase = float(3.0 / (16.0 * Math.PI)).mul(float(1.0).add(mu2));
+    const g = nodeClamp(u.mieDirectionalG, 0.0, 0.95);
+    const g2 = g.mul(g);
+    const miePhase = float(3.0 / (8.0 * Math.PI))
+      .mul(float(1.0).sub(g2))
+      .mul(float(1.0).add(mu2))
+      .div(float(2.0).add(g2))
+      .div(pow(float(1.0).add(g2).sub(g.mul(mu).mul(2.0)), 1.5));
+
+    const sunIntensity = mix(8.0, 18.0, day).mul(nodeSmoothstep(-0.18, 0.05, sunY));
+    let scatter = sumR.mul(betaRayleigh).mul(rayleighPhase).add(sumM.mul(betaMie).mul(miePhase)).mul(sunIntensity);
+
+    // A small multiple-scattering-inspired ambient lift keeps the anti-solar sky
+    // from going unnaturally black without needing LUTs.
+    const horizon = nodeClamp(viewDir.y.mul(0.5).add(0.5), 0.0, 1.0);
+    const ambientSky = mix(vec3(0.020, 0.035, 0.075), vec3(0.10, 0.24, 0.55).mul(u.rayleigh.mul(0.35)), day)
+      .mul(pow(horizon, 0.35))
+      .mul(float(0.15).add(day.mul(0.35)));
+    scatter = scatter.add(ambientSky);
+
+    // Sunset warm extinction and a compact solar disc/glow.
+    const sunDot = max(mu, 0.0);
+    const sunDisc = pow(sunDot, 3500.0).mul(day).mul(3.0);
+    const sunGlow = pow(sunDot, mix(20.0, 6.0, nodeClamp(u.turbidity.div(12.0), 0.0, 1.0))).mul(nodeSmoothstep(-0.08, 0.35, sunY)).mul(0.18);
+    const warm = mix(vec3(1.0, 0.38, 0.16), vec3(1.0, 0.92, 0.72), day);
+    scatter = scatter.add(warm.mul(sunDisc.add(sunGlow)));
+
+    const twilightTint = mix(vec3(0.90, 0.28, 0.18), vec3(0.22, 0.16, 0.42), horizon);
+    scatter = mix(scatter, scatter.add(twilightTint.mul(0.22)), twilight);
+
+    const night = mix(vec3(0.008, 0.014, 0.035), vec3(0.025, 0.040, 0.090), pow(horizon, 0.7));
+    let col = mix(night, scatter, nodeSmoothstep(-0.18, 0.02, sunY));
+    col = oneMinus(exp(col.mul(-1.15)));
+    col = nodeClamp(col, vec3(0.0), vec3(8.0));
+    return vec4(col, 1.0);
+  })();
+
+  const sky = new THREE.Mesh(geometry, material);
+  sky.name = 'metaverse-sky-atmosphere-tsl';
   sky.scale.setScalar(scale);
-  const u = sky.material.uniforms;
-  u.turbidity.value = turbidity;
-  u.rayleigh.value = rayleigh;
-  u.mieCoefficient.value = mieCoefficient;
-  u.mieDirectionalG.value = mieDirectionalG;
-  u.sunPosition.value.copy(vectorFrom(sunPosition).normalize());
   return sky;
 }
 
@@ -1021,68 +988,6 @@ export class CloudLayer {
   }
 }
 
-const PRECIP_POINT_VERT = /* glsl */`
-  attribute float aSeed;
-  attribute float aSize;
-  uniform float uSizeScale;
-  uniform float uFadeNear;
-  uniform float uFadeFar;
-  varying float vSeed;
-  varying float vFade;
-  varying float vDist;
-  void main() {
-    vSeed = aSeed;
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * mv;
-    float dist = -mv.z;
-    vDist = dist;
-    gl_PointSize = aSize * uSizeScale * (340.0 / max(dist, 1.0));
-    vFade = 1.0 - smoothstep(uFadeNear, uFadeFar, dist);
-  }
-`;
-
-const PRECIP_POINT_FRAG = /* glsl */`
-  uniform sampler2D uTexture;
-  uniform float uTextureEnabled;
-  uniform vec3 uColor;
-  uniform vec3 uSunColor;
-  uniform float uSunFactor;
-  uniform vec3 uFogColor;
-  uniform float uFogNear;
-  uniform float uFogFar;
-  uniform float uFogEnabled;
-  uniform float uOpacity;
-  uniform float uSoftness;
-  uniform float uTime;
-  uniform float uTwinkle;
-  varying float vSeed;
-  varying float vFade;
-  varying float vDist;
-  void main() {
-    float shapeAlpha;
-    vec3 texColor;
-    if (uTextureEnabled > 0.5) {
-      vec4 tex = texture2D(uTexture, gl_PointCoord);
-      shapeAlpha = tex.a;
-      texColor = tex.rgb;
-    } else {
-      vec2 uv = gl_PointCoord - 0.5;
-      float r = length(uv);
-      shapeAlpha = smoothstep(0.5, 0.5 - uSoftness, r);
-      texColor = vec3(1.0);
-    }
-    if (shapeAlpha < 0.01) discard;
-    float twinkle = 1.0 - uTwinkle + uTwinkle * (0.55 + 0.45 * sin(uTime * 3.0 + vSeed * 50.0));
-    vec3 col = uColor * texColor + uSunColor * uSunFactor * 0.35;
-    if (uFogEnabled > 0.5) {
-      float ff = smoothstep(uFogNear, uFogFar, vDist);
-      col = mix(col, uFogColor, ff * 0.7);
-      shapeAlpha *= 1.0 - ff * 0.5;
-    }
-    gl_FragColor = vec4(col, shapeAlpha * uOpacity * vFade * twinkle);
-  }
-`;
-
 const PRECIP_DEFAULTS = {
   type: 'none',
   intensity: 0.7,
@@ -1165,30 +1070,50 @@ export class Precipitation {
     geo.setAttribute('aSize', new THREE.BufferAttribute(this._size, 1));
     geo.setDrawRange(0, 0);
 
-    this._pointMat = new THREE.ShaderMaterial({
-      uniforms: {
-        uTexture: { value: null },
-        uTextureEnabled: { value: 0 },
-        uColor: { value: new THREE.Color(0xffffff) },
-        uSunColor: { value: new THREE.Color(0xfff0d2) },
-        uSunFactor: { value: 0 },
-        uFogColor: { value: new THREE.Color(0x9fb7d5) },
-        uFogNear: { value: 60 },
-        uFogFar: { value: 360 },
-        uFogEnabled: { value: 0 },
-        uOpacity: { value: 0 },
-        uSizeScale: { value: 1 },
-        uSoftness: { value: 0.18 },
-        uFadeNear: { value: 12 },
-        uFadeFar: { value: 360 },
-        uTime: { value: 0 },
-        uTwinkle: { value: 0 },
-      },
-      vertexShader: PRECIP_POINT_VERT,
-      fragmentShader: PRECIP_POINT_FRAG,
-      transparent: true,
-      depthWrite: false,
-    });
+    this._defaultPrecipTexture = createSolidTexture(255, 255, 255, 255);
+    this._pointMat = new THREE.PointsNodeMaterial();
+    this._pointMat.transparent = true;
+    this._pointMat.depthWrite = false;
+    this._pointMat.sizeAttenuation = true;
+
+    const u = {
+      uTexture: assignUniform(this._pointMat, 'uTexture', texture(this._defaultPrecipTexture)),
+      uTextureEnabled: assignUniform(this._pointMat, 'uTextureEnabled', uniform(0)),
+      uColor: assignUniform(this._pointMat, 'uColor', uniform(new THREE.Color(0xffffff))),
+      uSunColor: assignUniform(this._pointMat, 'uSunColor', uniform(new THREE.Color(0xfff0d2))),
+      uSunFactor: assignUniform(this._pointMat, 'uSunFactor', uniform(0)),
+      uFogColor: assignUniform(this._pointMat, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
+      uFogNear: assignUniform(this._pointMat, 'uFogNear', uniform(60)),
+      uFogFar: assignUniform(this._pointMat, 'uFogFar', uniform(360)),
+      uFogEnabled: assignUniform(this._pointMat, 'uFogEnabled', uniform(0)),
+      uOpacity: assignUniform(this._pointMat, 'uOpacity', uniform(0)),
+      uSizeScale: assignUniform(this._pointMat, 'uSizeScale', uniform(1)),
+      uSoftness: assignUniform(this._pointMat, 'uSoftness', uniform(0.18)),
+      uFadeNear: assignUniform(this._pointMat, 'uFadeNear', uniform(12)),
+      uFadeFar: assignUniform(this._pointMat, 'uFadeFar', uniform(360)),
+      uTime: assignUniform(this._pointMat, 'uTime', uniform(0)),
+      uTwinkle: assignUniform(this._pointMat, 'uTwinkle', uniform(0)),
+    };
+    const aSeed = attribute('aSeed', 'float');
+    const aSize = attribute('aSize', 'float');
+    const dist = length(cameraPosition.sub(positionWorld));
+    const fade = oneMinus(nodeSmoothstep(u.uFadeNear, u.uFadeFar, dist));
+    this._pointMat.scaleNode = aSize.mul(u.uSizeScale).mul(float(340.0).div(max(dist, 1.0)));
+    this._pointMat.fragmentNode = Fn(() => {
+      const c = uv().sub(0.5);
+      const r = length(c);
+      const proceduralAlpha = nodeSmoothstep(0.5, float(0.5).sub(u.uSoftness), r);
+      const tex = texture(u.uTexture, uv());
+      const shapeAlpha = u.uTextureEnabled.greaterThan(0.5).select(tex.a, proceduralAlpha);
+      const texColor = u.uTextureEnabled.greaterThan(0.5).select(tex.rgb, vec3(1.0));
+      If(shapeAlpha.lessThan(0.01), () => { Discard(); });
+      const twinkle = oneMinus(u.uTwinkle).add(u.uTwinkle.mul(float(0.55).add(sin(u.uTime.mul(3.0).add(aSeed.mul(50.0))).mul(0.45))));
+      let col = u.uColor.mul(texColor).add(u.uSunColor.mul(u.uSunFactor).mul(0.35));
+      const ff = nodeSmoothstep(u.uFogNear, u.uFogFar, dist).mul(u.uFogEnabled);
+      col = mix(col, u.uFogColor, ff.mul(0.7));
+      const alpha = shapeAlpha.mul(u.uOpacity).mul(fade).mul(twinkle).mul(oneMinus(ff.mul(0.5)));
+      return vec4(col, alpha);
+    })();
     this._points = new THREE.Points(geo, this._pointMat);
     this._points.frustumCulled = false;
     this._group.add(this._points);
