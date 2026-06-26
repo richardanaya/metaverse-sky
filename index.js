@@ -40,6 +40,7 @@ const CLOUD_DEFAULTS = {
   noiseScale: 0.012,
   detailStrength: 0.45,
   holes: 0.5,
+  cloudType: 0.55,
   sharpness: 0.35,
   wispiness: 0.45,
   darkness: 0,
@@ -58,6 +59,7 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
   noiseScale: CLOUD_DEFAULTS.noiseScale,
   detailStrength: CLOUD_DEFAULTS.detailStrength,
   holes: CLOUD_DEFAULTS.holes,
+  cloudType: CLOUD_DEFAULTS.cloudType,
   sharpness: CLOUD_DEFAULTS.sharpness,
   wispiness: CLOUD_DEFAULTS.wispiness,
   darkness: CLOUD_DEFAULTS.darkness,
@@ -329,18 +331,38 @@ const cloudFbm = Fn(([p]) => {
 // dome and does not swim with camera translation.
 function sampleCloudDensity(u, p, covLow, width, scale) {
   // Low-frequency field = cloud macro shape; medium field = fluffy body.
-  const macro = cloudFbm(p.mul(scale.mul(0.22))).mul(0.5).add(0.5);
-  const body = cloudFbm(p.mul(scale.mul(1.0))).mul(0.5).add(0.5);
+  // Nubis-style simplification: use a vertical density envelope and flatten
+  // the vertical noise axis so the raymarch does not reveal repeated stacked
+  // noise layers.
+  const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
+  const type = nodeClamp(u.uCloudType, 0.0, 1.0);
+  // 0=stratus/flatter, 1=cumulus/taller/puffier.
+  const bottomGradient = pow(heightFraction, mix(0.32, 0.82, type));
+  const topGradient = pow(oneMinus(heightFraction), mix(1.35, 0.55, type));
+  const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(2.2, 3.05, type)), 0.0, 1.0);
+  const cloudP = p.mul(vec3(1.0, mix(0.08, 0.32, type), 1.0));
+
+  const macro = cloudFbm(cloudP.mul(scale.mul(mix(0.16, 0.28, type)))).mul(0.5).add(0.5);
+  const body = cloudFbm(cloudP.mul(scale.mul(mix(0.72, 1.18, type)))).mul(0.5).add(0.5);
   // One cheap non-FBM high-frequency sample to erode holes/details without
   // paying for another expensive raymarch FBM.
-  const detail = cloudNoise3(p.mul(scale.mul(2.8))).mul(0.5).add(0.5);
+  const detail = cloudNoise3(cloudP.mul(scale.mul(2.8))).mul(0.5).add(0.5);
   const shape = nodeSmoothstep(covLow, covLow.add(width), macro);
-  let fill = nodeSmoothstep(0.24, 0.78, body);
-  // Detail slider controls small-scale breakup; holes slider controls how much
-  // of that breakup actually cuts through to sky.
-  fill = fill.add(detail.sub(0.5).mul(mix(0.0, 0.35, u.uDetailStrength)));
-  fill = fill.sub(oneMinus(detail).mul(mix(0.04, 0.62, u.uHoles)));
-  return nodeClamp(shape.mul(fill).add(0.055), 0.0, 1.0);
+  const baseFill = nodeSmoothstep(0.24, 0.78, body);
+
+  // Nubis-inspired edge-aware erosion: preserve dense cloud cores, and let
+  // detail/holes bite harder into thin edge regions and upper cloud portions.
+  const baseDensity = shape.mul(baseFill);
+  const edgeMask = oneMinus(nodeSmoothstep(0.25, 0.78, baseDensity));
+  const topDetailMask = mix(0.45, mix(1.05, 1.45, type), heightFraction);
+  const detailAmount = mix(0.0, 0.42, u.uDetailStrength).mul(edgeMask).mul(topDetailMask);
+  const holeAmount = mix(0.03, 0.72, u.uHoles).mul(edgeMask).mul(topDetailMask);
+
+  const fill = baseFill
+    .add(detail.sub(0.5).mul(detailAmount))
+    .sub(oneMinus(detail).mul(holeAmount));
+
+  return nodeClamp(shape.mul(fill).add(0.055), 0.0, 1.0).mul(verticalProfile);
 }
 
 // Volumetric cloud shader following the standard raymarch model:
@@ -352,10 +374,10 @@ function sampleCloudDensity(u, p, covLow, width, scale) {
 //   - blue-noise-style per-pixel dither on the march start to hide banding at
 //     a low step count
 // Camera-anchored sampling keeps the pattern fixed to the sky.
-const CLOUD_STEPS = 8;
+const CLOUD_STEPS = 24;
 const CLOUD_ABSORPTION = 7.0;
 
-function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, sharpness, wispiness) {
+function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, cloudType, sharpness, wispiness) {
   const material = new THREE.MeshBasicNodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
@@ -368,6 +390,7 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     uCoverage: assignUniform(material, 'uCoverage', uniform(coverage)),
     uDetailStrength: assignUniform(material, 'uDetailStrength', uniform(detailStrength)),
     uHoles: assignUniform(material, 'uHoles', uniform(holes)),
+    uCloudType: assignUniform(material, 'uCloudType', uniform(cloudType)),
     uSharpness: assignUniform(material, 'uSharpness', uniform(sharpness)),
     uWispiness: assignUniform(material, 'uWispiness', uniform(wispiness)),
     uScale: assignUniform(material, 'uScale', uniform(0.04)),
@@ -409,7 +432,11 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // instead of making the camera fly through arbitrary sphere noise.
     const up = max(viewDir.y, float(0.08));
     const slabStart = max(u.uAltitude.sub(cam.y).div(up), float(0.0));
-    const stepLen = u.uThickness.div(float(CLOUD_STEPS)).div(up);
+    // Nubis-style adaptive march: keep small steps nearby, grow the step size
+    // with distance so far/horizon clouds are cheaper and less visibly layered.
+    const distanceFactor = nodeClamp(slabStart.div(u.uRadius), 0.0, 1.0);
+    const adaptiveVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(1.0, 2.0, distanceFactor));
+    const stepLen = adaptiveVerticalStep.div(up);
     const transmittance = float(1.0).toVar();
     const lightEnergy = vec3(0.0).toVar();
     const depth = slabStart.add(stepLen.mul(0.5)).toVar();
@@ -422,22 +449,27 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
 
       // Only accumulate where there's actually cloud.
       If(d.greaterThan(float(0.005)), () => {
-        // Cheap lighting: avoid an extra density sample per ray step. This is a
-        // big perf win versus directional-derivative lighting while preserving
-        // enough sun/shadow variation for the sky layer.
-        const diffuse = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.35, 1.0);
+        // Cheap Nubis-style lighting approximation: height-aware ambient,
+        // density self-shadowing, and forward sun scattering without adding
+        // another expensive density sample.
+        const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
+        const topLight = pow(heightFraction, 0.55);
+        const baseShadow = oneMinus(topLight).mul(0.42);
+        const coreShadow = nodeSmoothstep(0.35, 0.95, d).mul(0.48);
+        const selfShadow = nodeClamp(oneMinus(baseShadow.add(coreShadow)), 0.28, 1.0);
+        const diffuse = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.35, 1.0).mul(selfShadow);
 
         // Beer's law style attenuation based on local density.
         const lightTransmittance = exp(d.negate().mul(1.1));
-        const luminance = float(0.05).add(d.mul(phase));
-        // Cloud color is sun-warmed where lit, shadow-colored where occluded.
-        const lit = mix(u.uShadowColor, u.uSunColor, lightTransmittance.mul(diffuse));
-        const stepColor = u.uColor.mul(lit).mul(luminance);
+        const luminance = float(0.06).add(d.mul(phase));
+        const directLight = mix(u.uShadowColor, u.uSunColor, lightTransmittance.mul(diffuse));
+        const ambientLight = u.uFogColor.mul(mix(0.18, 0.55, topLight)).mul(oneMinus(coreShadow.mul(0.45)));
+        const stepColor = u.uColor.mul(directLight.mul(luminance).add(ambientLight.mul(0.28)));
 
         // Front-to-back compositing via Beer's law for the view ray.
         // Normalize optical depth by step count instead of raw world distance;
         // raw stepLen made the volume read like opaque paint.
-        const tau = d.div(float(CLOUD_STEPS)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
+        const tau = d.mul(adaptiveVerticalStep.div(u.uThickness)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
         lightEnergy.addAssign(transmittance.mul(stepColor).mul(tau).mul(3.5));
         transmittance.mulAssign(exp(tau.negate()));
       });
@@ -486,6 +518,7 @@ export class CloudSkyLayer {
       this.params.darkness,
       this.params.detailStrength,
       this.params.holes,
+      this.params.cloudType,
       this.params.sharpness,
       this.params.wispiness,
     );
@@ -548,6 +581,7 @@ export class CloudSkyLayer {
       cloudNoiseScale: p.noiseScale,
       cloudDetailStrength: p.detailStrength,
       cloudHoles: p.holes,
+      cloudType: p.cloudType,
       cloudSharpness: p.sharpness,
       cloudWispiness: p.wispiness,
       cloudDarkness: p.darkness,
@@ -567,6 +601,7 @@ export class CloudSkyLayer {
     if (data.cloudNoiseScale != null) p.noiseScale = data.cloudNoiseScale;
     if (data.cloudDetailStrength != null) p.detailStrength = data.cloudDetailStrength;
     if (data.cloudHoles != null) p.holes = data.cloudHoles;
+    if (data.cloudType != null) p.cloudType = data.cloudType;
     if (data.cloudSharpness != null) p.sharpness = data.cloudSharpness;
     if (data.cloudWispiness != null) p.wispiness = data.cloudWispiness;
     if (data.cloudDarkness != null) p.darkness = data.cloudDarkness;
@@ -577,6 +612,7 @@ export class CloudSkyLayer {
       u.uScale.value = Math.max(0.0005, p.noiseScale * (p.tile / 6) * 0.45);
       u.uDetailStrength.value = p.detailStrength;
       u.uHoles.value = p.holes;
+      u.uCloudType.value = p.cloudType;
       u.uSharpness.value = p.sharpness;
       u.uWispiness.value = p.wispiness;
       u.uRadius.value = p.drawDistance;
@@ -1507,6 +1543,7 @@ export class SkyEditor {
     this._slider('Pattern scale', 0.002, 0.04, 0.001, p.noiseScale, (v) => c.applyAtmosphereSettings({ cloudNoiseScale: v }));
     this._slider('Detail', 0, 2, 0.01, p.detailStrength, (v) => c.applyAtmosphereSettings({ cloudDetailStrength: v }));
     this._slider('Holes', 0, 1, 0.01, p.holes, (v) => c.applyAtmosphereSettings({ cloudHoles: v }));
+    this._slider('Cloud Type', 0, 1, 0.01, p.cloudType, (v) => c.applyAtmosphereSettings({ cloudType: v }));
     this._slider('Sharpness', 0, 1, 0.01, p.sharpness, (v) => c.applyAtmosphereSettings({ cloudSharpness: v }));
     this._slider('Wispiness', 0, 1, 0.01, p.wispiness, (v) => c.applyAtmosphereSettings({ cloudWispiness: v }));
 

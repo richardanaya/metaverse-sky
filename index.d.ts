@@ -28,6 +28,7 @@ export interface CloudSettings {
   noiseScale: number;
   detailStrength: number;
   holes: number;
+  cloudType: number;
   sharpness: number;
   wispiness: number;
   darkness: number;
@@ -58,6 +59,7 @@ export interface AtmosphereSettings {
   cloudNoiseScale?: number;
   cloudDetailStrength?: number;
   cloudHoles?: number;
+  cloudType?: number;
   cloudSharpness?: number;
   cloudWispiness?: number;
   cloudDarkness?: number;
