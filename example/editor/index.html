@@ -92,11 +92,14 @@
           <label class="sub-label" for="coverage">Coverage <span id="coverage-value">0.50</span></label>
           <input id="coverage" type="range" min="0.2" max="0.8" step="0.01" value="0.5" />
 
-          <label class="sub-label" for="noise-scale">Pattern Scale <span id="noise-scale-value">0.028</span></label>
-          <input id="noise-scale" type="range" min="0.01" max="0.08" step="0.001" value="0.028" />
+          <label class="sub-label" for="noise-scale">Pattern Scale <span id="noise-scale-value">0.012</span></label>
+          <input id="noise-scale" type="range" min="0.002" max="0.04" step="0.001" value="0.012" />
 
           <label class="sub-label" for="detail-strength">Edge Detail <span id="detail-strength-value">0.45</span></label>
-          <input id="detail-strength" type="range" min="0" max="1" step="0.01" value="0.45" />
+          <input id="detail-strength" type="range" min="0" max="2" step="0.01" value="0.45" />
+
+          <label class="sub-label" for="cloud-holes">Holes <span id="cloud-holes-value">0.50</span></label>
+          <input id="cloud-holes" type="range" min="0" max="1" step="0.01" value="0.5" />
 
           <label class="sub-label" for="sharpness">Sharpness <span id="sharpness-value">0.35</span></label>
           <input id="sharpness" type="range" min="0" max="1" step="0.01" value="0.35" />
@@ -128,10 +131,11 @@
         </div>
 
         <div class="control-group">
-          <label for="wind-direction">Wind Direction <span id="wind-direction-value">255°</span></label>
+          <label>Precipitation Wind</label>
+          <label class="sub-label" for="wind-direction">Direction <span id="wind-direction-value">255°</span></label>
           <input id="wind-direction" type="range" min="0" max="360" step="1" value="255" />
 
-          <label class="sub-label" for="wind-speed">Wind Speed <span id="wind-speed-value">0.045</span></label>
+          <label class="sub-label" for="wind-speed">Speed <span id="wind-speed-value">0.045</span></label>
           <input id="wind-speed" type="range" min="0" max="0.15" step="0.001" value="0.045" />
         </div>
 

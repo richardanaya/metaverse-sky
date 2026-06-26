@@ -32,15 +32,14 @@ const CLOUD_DEFAULTS = {
   renderMode: 'volume',
   altitude: 80,
   opacity: 0.95,
-  windSpeed: 0.045,
-  windDirection: 255,
   tile: 6,
   drawDistance: 420,
   cloudColor: new THREE.Color(0xf2f6fc),
   autoTint: true,
   coverage: 0.5,
-  noiseScale: 0.028,
+  noiseScale: 0.012,
   detailStrength: 0.45,
+  holes: 0.5,
   sharpness: 0.35,
   wispiness: 0.45,
   darkness: 0,
@@ -51,8 +50,6 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
   renderMode: CLOUD_DEFAULTS.renderMode,
   altitude: CLOUD_DEFAULTS.altitude,
   opacity: CLOUD_DEFAULTS.opacity,
-  windSpeed: CLOUD_DEFAULTS.windSpeed,
-  windDirection: CLOUD_DEFAULTS.windDirection,
   tile: CLOUD_DEFAULTS.tile,
   drawDistance: CLOUD_DEFAULTS.drawDistance,
   cloudColor: CLOUD_DEFAULTS.cloudColor.getHex(),
@@ -60,6 +57,7 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
   coverage: CLOUD_DEFAULTS.coverage,
   noiseScale: CLOUD_DEFAULTS.noiseScale,
   detailStrength: CLOUD_DEFAULTS.detailStrength,
+  holes: CLOUD_DEFAULTS.holes,
   sharpness: CLOUD_DEFAULTS.sharpness,
   wispiness: CLOUD_DEFAULTS.wispiness,
   darkness: CLOUD_DEFAULTS.darkness,
@@ -125,37 +123,243 @@ function createSolidTexture(r = 255, g = 255, b = 255, a = 255) {
   tex.needsUpdate = true;
   return tex;
 }
+// --- 3D Perlin-Worley cloud noise texture (baked once on init) ----------
+// A 3D texture is far cheaper to sample than procedural noise per ray march
+// step, which makes the volumetric cloud shader performant while still using a
+// genuine Perlin-Worley density field.
 
-function hash13Node(p) {
-  const q = fract(p.mul(0.1031));
-  const d = dot(q, q.yzx.add(33.33));
-  return fract(q.x.add(q.y).mul(q.z).add(d));
+function hash31(x, y, z) {
+  // Deterministic [0,1) hash from 3 integers. Works across wrap boundaries
+  // because the inputs are pre-wrapped to a tile period by the callers.
+  let h = (x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1274126177;
+  h = (h ^ (h >>> 13)) >>> 0;
+  h = Math.imul(h, 1274126177) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
 }
 
-function vnoise3Node(p) {
+// Modular floor so lattice points wrap at the tile period → seamless tiling.
+function tmod(n, m) {
+  return ((n % m) + m) % m;
+}
+
+// Gradient-noise helper: derive a stable 3D gradient direction from a seed
+// hash, then dot it with the distance vector. This is what makes Perlin noise
+// smooth and blobby instead of blocky (value noise gives square lattice edges).
+const _GRAD = [
+  [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
+  [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
+  [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1],
+  [1, 1, 1], [-1, 1, 1], [1, -1, 1], [-1, -1, 1],
+  [1, 1, -1], [-1, 1, -1], [1, -1, -1], [-1, -1, -1],
+];
+
+function gradDot(hash, dx, dy, dz) {
+  const g = _GRAD[Math.floor(hash * _GRAD.length) % _GRAD.length];
+  return g[0] * dx + g[1] * dy + g[2] * dz;
+}
+
+function smooth3(t) {
+  return t * t * (3 - 2 * t);
+}
+
+// Proper gradient (Perlin) 3D noise — smooth and free of value-noise blockiness.
+// `tile` is the lattice period; lattice points wrap modulo it so the result is
+// seamlessly tileable (matching at x=0 and x=tile).
+function perlin3(x, y, z, tile) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = smooth3(xf), v = smooth3(yf), w = smooth3(zf);
+  const wx0 = tmod(xi, tile), wy0 = tmod(yi, tile), wz0 = tmod(zi, tile);
+  const wx1 = tmod(xi + 1, tile), wy1 = tmod(yi + 1, tile), wz1 = tmod(zi + 1, tile);
+  const g000 = hash31(wx0, wy0, wz0), g100 = hash31(wx1, wy0, wz0);
+  const g010 = hash31(wx0, wy1, wz0), g110 = hash31(wx1, wy1, wz0);
+  const g001 = hash31(wx0, wy0, wz1), g101 = hash31(wx1, wy0, wz1);
+  const g011 = hash31(wx0, wy1, wz1), g111 = hash31(wx1, wy1, wz1);
+  const d000 = gradDot(g000, xf, yf, zf), d100 = gradDot(g100, xf - 1, yf, zf);
+  const d010 = gradDot(g010, xf, yf - 1, zf), d110 = gradDot(g110, xf - 1, yf - 1, zf);
+  const d001 = gradDot(g001, xf, yf, zf - 1), d101 = gradDot(g101, xf - 1, yf, zf - 1);
+  const d011 = gradDot(g011, xf, yf - 1, zf - 1), d111 = gradDot(g111, xf - 1, yf - 1, zf - 1);
+  const x00 = d000 + (d100 - d000) * u, x10 = d010 + (d110 - d010) * u;
+  const x01 = d001 + (d101 - d001) * u, x11 = d011 + (d111 - d011) * u;
+  const y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+  // Perlin output is in ~[-1,1]; remap to [0,1].
+  return y0 + (y1 - y0) * w + 0.5;
+}
+
+function worley3(x, y, z, tile) {
+  // Inverted Worley: 1 near cell feature points, 0 between. Tileable: feature
+  // points live inside wrapped cells so the field matches at boundaries.
+  let minD = 1e9;
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const cx = tmod(xi + dx, tile), cy = tmod(yi + dy, tile), cz = tmod(zi + dz, tile);
+        const fx = cx + hash31(cx, cy, cz);
+        const fy = cy + hash31(cy, cz, cx);
+        const fz = cz + hash31(cz, cx, cy);
+        // Use unwrapped coordinates for the distance check so crossing the edge
+        // still measures true distance to the (wrapped) feature point.
+        const ddx = (xi + dx) + hash31(cx, cy, cz) - x;
+        const ddy = (yi + dy) + hash31(cy, cz, cx) - y;
+        const ddz = (zi + dz) + hash31(cz, cx, cy) - z;
+        const d = ddx * ddx + ddy * ddy + ddz * ddz;
+        if (d < minD) minD = d;
+      }
+    }
+  }
+  return 1 - clamp(Math.sqrt(minD), 0, 1);
+}
+
+// FBM over the tileable noise. `tile` is the lattice period; octaves use integer
+// frequency multipliers that divide the period so each octave stays tileable.
+function fbmPerlin(x, y, z, octaves, tile) {
+  let total = 0, amp = 0.5, freq = 1, max = 0;
+  for (let i = 0; i < octaves; i++) {
+    total += perlin3(x * freq, y * freq, z * freq, tile / freq) * amp;
+    max += amp;
+    freq *= 2;
+    amp *= 0.5;
+  }
+  return total / max;
+}
+
+function fbmWorley(x, y, z, octaves, tile) {
+  let total = 0, amp = 0.5, freq = 1, max = 0;
+  for (let i = 0; i < octaves; i++) {
+    total += worley3(x * freq, y * freq, z * freq, tile / freq) * amp;
+    max += amp;
+    freq *= 2;
+    amp *= 0.5;
+  }
+  return total / max;
+}
+
+const CLOUD_NOISE_SIZE = 128;
+
+let _cloudNoiseTexture = null;
+
+function getCloudNoiseTexture() {
+  if (_cloudNoiseTexture) return _cloudNoiseTexture;
+  const size = CLOUD_NOISE_SIZE;
+  const data = new Uint8Array(size * size * size);
+  for (let z = 0; z < size; z++) {
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        // Sample the tileable noise in lattice space (texel coords), so the
+        // 3D texture is seamlessly periodic with period `size`.
+        const perlin = fbmPerlin(x, y, z, 3, size);
+        const worley = fbmWorley(x, y, z, 2, size);
+        // Perlin-Worley: Perlin gives the billowy base, Worley carves cells.
+        let n = perlin * 0.6 + worley * 0.4;
+        // Bias the field so smooth thresholding yields soft gradients.
+        n = clamp(n, 0, 1);
+        data[x + y * size + z * size * size] = Math.round(n * 255);
+      }
+    }
+  }
+  const tex = new THREE.Data3DTexture(data, size, size, size);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.wrapR = THREE.RepeatWrapping;
+  tex.unpackAlignment = 1;
+  tex.needsUpdate = true;
+  _cloudNoiseTexture = tex;
+  return tex;
+}
+
+// Sample the baked 3D Perlin-Worley texture and turn it into a cloud density
+// [0,1] given a world-space sample position. Expects shared uniforms u.
+// Sample the baked 3D Perlin-Worley texture and turn it into a cloud density
+// [0,1]. Density is shaped by a vertical envelope centered on the cloud
+// `altitude` (a smooth band of half-height `u.uThickness`), so the layer is
+// visible from any view angle, not just rays crossing a slab.
+// Sample baked Perlin-Worley density by a view-space coordinate (the march
+// position relative to the camera). Because the noise is camera-anchored the
+// cloud pattern is fixed to the sky (it follows the viewer like a sky dome),
+// so it never swims and is visible from any camera angle.
+// Article-style procedural 3D noise: hash -> value noise -> FBM. This removes
+// the interim 3D texture path, which was reading as static/noisy in WebGL/WebGPU.
+const cloudHash3 = Fn(([p]) => {
+  const q = fract(p.mul(vec3(0.1031, 0.1130, 0.0973)));
+  const r = dot(q, q.yzx.add(33.33));
+  return fract(vec3(q.x.add(q.y).mul(q.z).add(r), q.y.add(q.z).mul(q.x).add(r), q.z.add(q.x).mul(q.y).add(r)));
+});
+
+const cloudNoise3 = Fn(([p]) => {
   const i = floor(p);
-  let f = fract(p);
-  f = f.mul(f).mul(vec3(3.0).sub(f.mul(2.0)));
-  const n000 = hash13Node(i);
-  const n100 = hash13Node(i.add(vec3(1.0, 0.0, 0.0)));
-  const n010 = hash13Node(i.add(vec3(0.0, 1.0, 0.0)));
-  const n110 = hash13Node(i.add(vec3(1.0, 1.0, 0.0)));
-  const n001 = hash13Node(i.add(vec3(0.0, 0.0, 1.0)));
-  const n101 = hash13Node(i.add(vec3(1.0, 0.0, 1.0)));
-  const n011 = hash13Node(i.add(vec3(0.0, 1.0, 1.0)));
-  const n111 = hash13Node(i.add(vec3(1.0, 1.0, 1.0)));
-  return mix(
-    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
-    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
-    f.z,
-  );
+  const f = fract(p);
+  const u = f.mul(f).mul(vec3(3.0).sub(f.mul(2.0)));
+  const n000 = cloudHash3(i.add(vec3(0.0, 0.0, 0.0))).x;
+  const n100 = cloudHash3(i.add(vec3(1.0, 0.0, 0.0))).x;
+  const n010 = cloudHash3(i.add(vec3(0.0, 1.0, 0.0))).x;
+  const n110 = cloudHash3(i.add(vec3(1.0, 1.0, 0.0))).x;
+  const n001 = cloudHash3(i.add(vec3(0.0, 0.0, 1.0))).x;
+  const n101 = cloudHash3(i.add(vec3(1.0, 0.0, 1.0))).x;
+  const n011 = cloudHash3(i.add(vec3(0.0, 1.0, 1.0))).x;
+  const n111 = cloudHash3(i.add(vec3(1.0, 1.0, 1.0))).x;
+  const x00 = mix(n000, n100, u.x);
+  const x10 = mix(n010, n110, u.x);
+  const x01 = mix(n001, n101, u.x);
+  const x11 = mix(n011, n111, u.x);
+  const y0 = mix(x00, x10, u.y);
+  const y1 = mix(x01, x11, u.y);
+  return mix(y0, y1, u.z).mul(2.0).sub(1.0);
+});
+
+const cloudFbm = Fn(([p]) => {
+  const f = float(0.0).toVar();
+  const amp = float(0.5).toVar();
+  const q = p.toVar();
+  const factor = float(2.02).toVar();
+  Loop({ start: int(0), end: int(3), type: 'int', name: 'i' }, () => {
+    f.addAssign(amp.mul(cloudNoise3(q)));
+    q.mulAssign(factor);
+    factor.addAssign(0.21);
+    amp.mulAssign(0.5);
+  });
+  return f;
+});
+
+// Density in [0,1]. `p` is camera-anchored so the pattern behaves like a sky
+// dome and does not swim with camera translation.
+function sampleCloudDensity(u, p, covLow, width, scale) {
+  // Low-frequency field = cloud macro shape; medium field = fluffy body.
+  const macro = cloudFbm(p.mul(scale.mul(0.22))).mul(0.5).add(0.5);
+  const body = cloudFbm(p.mul(scale.mul(1.0))).mul(0.5).add(0.5);
+  // One cheap non-FBM high-frequency sample to erode holes/details without
+  // paying for another expensive raymarch FBM.
+  const detail = cloudNoise3(p.mul(scale.mul(2.8))).mul(0.5).add(0.5);
+  const shape = nodeSmoothstep(covLow, covLow.add(width), macro);
+  let fill = nodeSmoothstep(0.24, 0.78, body);
+  // Detail slider controls small-scale breakup; holes slider controls how much
+  // of that breakup actually cuts through to sky.
+  fill = fill.add(detail.sub(0.5).mul(mix(0.0, 0.35, u.uDetailStrength)));
+  fill = fill.sub(oneMinus(detail).mul(mix(0.04, 0.62, u.uHoles)));
+  return nodeClamp(shape.mul(fill).add(0.055), 0.0, 1.0);
 }
 
-function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, sharpness, wispiness) {
+// Volumetric cloud shader following the standard raymarch model:
+//   - constant-step march through the view ray
+//   - density from a baked 3D Perlin-Worley texture
+//   - directional-derivative single-sample diffuse (no normals)
+//   - Beer's law transmittance accumulation
+//   - Henyey-Greenstein phase for anisotropic scattering
+//   - blue-noise-style per-pixel dither on the march start to hide banding at
+//     a low step count
+// Camera-anchored sampling keeps the pattern fixed to the sky.
+const CLOUD_STEPS = 8;
+const CLOUD_ABSORPTION = 7.0;
+
+function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, sharpness, wispiness) {
   const material = new THREE.MeshBasicNodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
-  material.side = THREE.DoubleSide;
+  material.side = THREE.BackSide;
   material.toneMapped = false;
 
   const u = {
@@ -163,49 +367,95 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     uOpacity: assignUniform(material, 'uOpacity', uniform(opacity)),
     uCoverage: assignUniform(material, 'uCoverage', uniform(coverage)),
     uDetailStrength: assignUniform(material, 'uDetailStrength', uniform(detailStrength)),
+    uHoles: assignUniform(material, 'uHoles', uniform(holes)),
     uSharpness: assignUniform(material, 'uSharpness', uniform(sharpness)),
     uWispiness: assignUniform(material, 'uWispiness', uniform(wispiness)),
-    uScale: assignUniform(material, 'uScale', uniform(0.006)),
-    uScroll: assignUniform(material, 'uScroll', uniform(new THREE.Vector2())),
-    uTime: assignUniform(material, 'uTime', uniform(0)),
+    uScale: assignUniform(material, 'uScale', uniform(0.04)),
     uSunDirection: assignUniform(material, 'uSunDirection', uniform(new THREE.Vector3(...DEFAULT_SUN_POSITION).normalize())),
     uSunColor: assignUniform(material, 'uSunColor', uniform(new THREE.Color(0xfff0d2))),
     uShadowColor: assignUniform(material, 'uShadowColor', uniform(new THREE.Color(0xc9d6e8))),
     uFogColor: assignUniform(material, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
     uDarkness: assignUniform(material, 'uDarkness', uniform(darkness)),
     uRadius: assignUniform(material, 'uRadius', uniform(420)),
+    uThickness: assignUniform(material, 'uThickness', uniform(60)),
+    uAltitude: assignUniform(material, 'uAltitude', uniform(80)),
   };
 
   material.fragmentNode = Fn(() => {
-    const rel = positionWorld.xz.sub(cameraPosition.xz);
-    const dist = length(rel);
-    const horizonFade = oneMinus(nodeSmoothstep(u.uRadius.mul(0.58), u.uRadius.mul(0.98), dist));
-    const p = positionWorld.xz.add(u.uScroll).mul(u.uScale);
-    const t = u.uTime.mul(0.015);
-    const n0 = vnoise3Node(vec3(p.x, p.y, t));
-    const wispCoord = vec2(p.x.mul(1.4).add(p.y.mul(0.28)), p.y.mul(5.6).sub(p.x.mul(0.16)));
-    const n1 = vnoise3Node(vec3(wispCoord.x.add(17.0), wispCoord.y.sub(9.0), t.add(4.0)));
-    const n2 = vnoise3Node(vec3(p.x.mul(6.8).sub(31.0), p.y.mul(6.8).add(12.0), t.mul(1.7)));
-    const threshold = mix(0.78, 0.38, nodeClamp(u.uCoverage, 0.0, 1.0));
-    const coarse = n0.mul(0.68).add(n1.mul(mix(0.16, 0.30, u.uWispiness))).add(n2.mul(0.08));
-    const coarseDens = nodeSmoothstep(threshold.sub(0.20), threshold.add(0.16), coarse);
-    const edgeMask = oneMinus(nodeSmoothstep(0.42, 0.96, coarseDens));
-    const eroded = coarse.sub(n2.mul(edgeMask).mul(u.uDetailStrength).mul(0.22));
-    const width = mix(0.22, 0.065, nodeClamp(u.uSharpness, 0.0, 1.0));
-    const dens = nodeSmoothstep(threshold.sub(width), threshold.add(width), eroded);
-    const wisps = nodeSmoothstep(0.24, 0.86, n1.add(n2.mul(0.5)));
-    let alpha = dens.mul(mix(float(0.58).sub(u.uWispiness.mul(0.22)), 1.0, wisps)).mul(horizonFade).mul(u.uOpacity);
-    If(alpha.lessThan(0.002), () => { Discard(); });
+    const px = positionWorld;
+    const cam = cameraPosition;
+    const viewDir = normalize(px.sub(cam));
+    const dist = length(px.sub(cam));
 
+    const covLow = mix(0.55, 0.05, nodeClamp(u.uCoverage, 0.0, 1.0));
+    const width = mix(0.50, 0.26, nodeClamp(u.uSharpness, 0.0, 1.0));
+    const scale = u.uScale;
     const sunDir = normalize(u.uSunDirection);
-    const viewDir = normalize(cameraPosition.sub(positionWorld));
-    const forward = pow(max(dot(viewDir, sunDir), 0.0), 4.0);
-    const topLight = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.15, 1.0);
-    let col = u.uColor.mul(mix(0.72, 1.12, n0)).mul(mix(0.75, 1.12, topLight));
-    col = mix(col.mul(u.uShadowColor), col, mix(0.45, 0.95, wisps));
-    col = col.add(u.uSunColor.mul(forward).mul(0.22).mul(oneMinus(u.uDarkness)));
+
+    // Horizon fade: clouds fill the sky above the horizon, fade out below it.
+    // Broad lower-horizon fade: clouds reach the horizon, but do not wrap down
+    // around/under the scene like a full enclosing sphere.
+    const horizonFade = nodeSmoothstep(float(0.0), float(0.16), viewDir.y);
+
+    // Henyey-Greenstein phase: brightens light looking toward the sun.
+    const mu = dot(viewDir, sunDir);
+    const g = float(0.5);
+    const gg = g.mul(g);
+    const phase = float(0.25).mul(float(1.0).sub(gg)).div(
+      pow(float(1.0).add(gg).sub(g.mul(mu).mul(2.0)), float(1.5)),
+    ).add(float(0.25));
+
+    // Fixed world-altitude cloud slab. This keeps the noise locked in the sky
+    // instead of making the camera fly through arbitrary sphere noise.
+    const up = max(viewDir.y, float(0.08));
+    const slabStart = max(u.uAltitude.sub(cam.y).div(up), float(0.0));
+    const stepLen = u.uThickness.div(float(CLOUD_STEPS)).div(up);
+    const transmittance = float(1.0).toVar();
+    const lightEnergy = vec3(0.0).toVar();
+    const depth = slabStart.add(stepLen.mul(0.5)).toVar();
+
+    Loop({ start: int(0), end: int(CLOUD_STEPS), type: 'int', name: 'i' }, () => {
+      // World-anchored sample point in the fixed altitude layer: no wind/time
+      // morphing, but camera translation sees the same clouds from new angles.
+      const p = cam.add(viewDir.mul(depth));
+      const d = sampleCloudDensity(u, p, covLow, width, scale).mul(horizonFade);
+
+      // Only accumulate where there's actually cloud.
+      If(d.greaterThan(float(0.005)), () => {
+        // Cheap lighting: avoid an extra density sample per ray step. This is a
+        // big perf win versus directional-derivative lighting while preserving
+        // enough sun/shadow variation for the sky layer.
+        const diffuse = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.35, 1.0);
+
+        // Beer's law style attenuation based on local density.
+        const lightTransmittance = exp(d.negate().mul(1.1));
+        const luminance = float(0.05).add(d.mul(phase));
+        // Cloud color is sun-warmed where lit, shadow-colored where occluded.
+        const lit = mix(u.uShadowColor, u.uSunColor, lightTransmittance.mul(diffuse));
+        const stepColor = u.uColor.mul(lit).mul(luminance);
+
+        // Front-to-back compositing via Beer's law for the view ray.
+        // Normalize optical depth by step count instead of raw world distance;
+        // raw stepLen made the volume read like opaque paint.
+        const tau = d.div(float(CLOUD_STEPS)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
+        lightEnergy.addAssign(transmittance.mul(stepColor).mul(tau).mul(3.5));
+        transmittance.mulAssign(exp(tau.negate()));
+      });
+
+      depth.addAssign(stepLen);
+    });
+
+    const alpha = nodeClamp(oneMinus(transmittance).mul(u.uOpacity).mul(1.35), 0.0, 1.0);
+    If(alpha.lessThan(0.003), () => { Discard(); });
+
+    let col = lightEnergy;
+    // Darkness tints the whole cloud cooler/darker for overcast moods.
     col = mix(col, col.mul(vec3(0.34, 0.38, 0.48)), u.uDarkness.mul(0.85));
-    col = mix(col, u.uFogColor, nodeSmoothstep(u.uRadius.mul(0.48), u.uRadius, dist).mul(0.45));
+    // Sun-facing forward scatter glow on the denser parts.
+    col = col.add(u.uSunColor.mul(pow(max(mu, 0.0), 8.0)).mul(oneMinus(transmittance)).mul(0.35).mul(oneMinus(u.uDarkness)));
+    // Distance fog blends far clouds into the sky.
+    col = mix(col, u.uFogColor, nodeSmoothstep(u.uRadius.mul(0.45), u.uRadius, dist).mul(0.5));
+    col = nodeClamp(col, vec3(0.0), vec3(3.0));
     return vec4(col, alpha);
   })();
 
@@ -218,13 +468,11 @@ export class CloudSkyLayer {
     this.camera = camera;
     this.sky = sky;
     this.params = normalizeCloudParams(options);
-    this._scroll = new THREE.Vector2();
     this._mesh = null;
     this._material = null;
     this._autoTintColor = new THREE.Color();
     this._sunColor = new THREE.Color(0xfff0d2);
     this._shadowColor = new THREE.Color(0xc9d6e8);
-    this._time = 0;
     this._ready = false;
   }
 
@@ -237,14 +485,14 @@ export class CloudSkyLayer {
       this.params.coverage,
       this.params.darkness,
       this.params.detailStrength,
+      this.params.holes,
       this.params.sharpness,
       this.params.wispiness,
     );
-    const size = Math.max(100, this.params.drawDistance * 2);
-    const geo = new THREE.PlaneGeometry(size, size, 1, 1);
+    const radius = Math.max(100, this.params.drawDistance);
+    const geo = new THREE.SphereGeometry(radius, 32, 16);
     this._mesh = new THREE.Mesh(geo, this._material);
-    this._mesh.rotation.x = -Math.PI / 2;
-    this._mesh.position.set(this.camera.position.x, this.params.altitude, this.camera.position.z);
+    this._mesh.position.copy(this.camera.position);
     this._mesh.frustumCulled = false;
     this._mesh.renderOrder = 2;
     this.scene.add(this._mesh);
@@ -285,18 +533,6 @@ export class CloudSkyLayer {
     return this;
   }
 
-  setWindDirection(direction) {
-    const vec = Array.isArray(direction) ? direction : [Number(direction?.x) || 0, Number(direction?.y) || 0];
-    const len = Math.hypot(vec[0], vec[1]) || 1;
-    this.params.windDirection = (THREE.MathUtils.radToDeg(Math.atan2(vec[1] / len, vec[0] / len)) % 360 + 360) % 360;
-    return this;
-  }
-
-  setWindSpeed(speed) {
-    this.params.windSpeed = Math.max(0, speed);
-    return this;
-  }
-
   getAtmosphereSettings() {
     const p = this.params;
     return {
@@ -304,8 +540,6 @@ export class CloudSkyLayer {
       cloudRenderMode: 'volume',
       cloudOpacity: p.opacity,
       cloudAltitude: p.altitude,
-      cloudWindSpeed: p.windSpeed,
-      cloudWindDirection: p.windDirection,
       cloudTile: p.tile,
       cloudDrawDistance: p.drawDistance,
       cloudColor: p.cloudColor.getHex(),
@@ -313,6 +547,7 @@ export class CloudSkyLayer {
       cloudCoverage: p.coverage,
       cloudNoiseScale: p.noiseScale,
       cloudDetailStrength: p.detailStrength,
+      cloudHoles: p.holes,
       cloudSharpness: p.sharpness,
       cloudWispiness: p.wispiness,
       cloudDarkness: p.darkness,
@@ -324,8 +559,6 @@ export class CloudSkyLayer {
     if (data.cloudsEnabled != null) p.enabled = !!data.cloudsEnabled;
     if (data.cloudOpacity != null) p.opacity = data.cloudOpacity;
     if (data.cloudAltitude != null) p.altitude = data.cloudAltitude;
-    if (data.cloudWindSpeed != null) p.windSpeed = data.cloudWindSpeed;
-    if (data.cloudWindDirection != null) p.windDirection = data.cloudWindDirection;
     if (data.cloudTile != null) p.tile = data.cloudTile;
     if (data.cloudDrawDistance != null) p.drawDistance = data.cloudDrawDistance;
     if (data.cloudColor != null) p.cloudColor.set(data.cloudColor);
@@ -333,6 +566,7 @@ export class CloudSkyLayer {
     if (data.cloudCoverage != null) p.coverage = data.cloudCoverage;
     if (data.cloudNoiseScale != null) p.noiseScale = data.cloudNoiseScale;
     if (data.cloudDetailStrength != null) p.detailStrength = data.cloudDetailStrength;
+    if (data.cloudHoles != null) p.holes = data.cloudHoles;
     if (data.cloudSharpness != null) p.sharpness = data.cloudSharpness;
     if (data.cloudWispiness != null) p.wispiness = data.cloudWispiness;
     if (data.cloudDarkness != null) p.darkness = data.cloudDarkness;
@@ -340,19 +574,22 @@ export class CloudSkyLayer {
       const u = this._material.uniforms;
       u.uOpacity.value = p.opacity;
       u.uCoverage.value = p.coverage;
-      u.uScale.value = Math.max(0.0005, p.noiseScale * 0.22 * (p.tile / 6));
+      u.uScale.value = Math.max(0.0005, p.noiseScale * (p.tile / 6) * 0.45);
       u.uDetailStrength.value = p.detailStrength;
+      u.uHoles.value = p.holes;
       u.uSharpness.value = p.sharpness;
       u.uWispiness.value = p.wispiness;
       u.uRadius.value = p.drawDistance;
+      u.uAltitude.value = p.altitude;
+      u.uThickness.value = Math.max(20, p.drawDistance * 0.18);
       u.uDarkness.value = p.darkness;
       u.uColor.value.copy(p.cloudColor);
     }
     if (this._mesh) {
-      const size = Math.max(100, p.drawDistance * 2);
+      const radius = Math.max(100, p.drawDistance);
       this._mesh.geometry.dispose();
-      this._mesh.geometry = new THREE.PlaneGeometry(size, size, 1, 1);
-      this._mesh.position.set(this.camera.position.x, p.altitude, this.camera.position.z);
+      this._mesh.geometry = new THREE.SphereGeometry(radius, 32, 16);
+      this._mesh.position.copy(this.camera.position);
     }
     this._syncVisibility();
     this._syncSunLighting();
@@ -361,15 +598,9 @@ export class CloudSkyLayer {
 
   update(dt) {
     if (!this._ready || !this.params.enabled) return;
-    this._time += dt;
     const p = this.params;
-    const wind = p.windDirection * Math.PI / 180;
-    this._scroll.x += Math.cos(wind) * p.windSpeed * dt * 60;
-    this._scroll.y += Math.sin(wind) * p.windSpeed * dt * 60;
-    this._mesh.position.set(this.camera.position.x, p.altitude, this.camera.position.z);
+    this._mesh.position.copy(this.camera.position);
     const u = this._material.uniforms;
-    u.uScroll.value.copy(this._scroll);
-    u.uTime.value = this._time;
     this._syncFog();
     this._syncSunLighting();
 
@@ -1035,13 +1266,11 @@ export class MetaverseSky {
   }
 
   setWindDirection(direction) {
-    this.clouds?.setWindDirection(direction);
     this.precipitation?.setWindDirection(direction);
     return this;
   }
 
   setWindSpeed(speed) {
-    this.clouds?.setWindSpeed(speed);
     this.precipitation?.setWindSpeed(speed);
     return this;
   }
@@ -1275,11 +1504,11 @@ export class SkyEditor {
 
     this._section('Cloud noise');
     this._slider('Coverage', 0.2, 0.9, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
-    this._slider('Pattern scale', 0.01, 0.08, 0.001, p.noiseScale, (v) => c.applyAtmosphereSettings({ cloudNoiseScale: v }));
-
-    this._section('Cloud wind');
-    this._slider('Speed', 0, 0.15, 0.001, p.windSpeed, (v) => c.applyAtmosphereSettings({ cloudWindSpeed: v }));
-    this._slider('Direction', 0, 360, 1, p.windDirection, (v) => c.applyAtmosphereSettings({ cloudWindDirection: v }));
+    this._slider('Pattern scale', 0.002, 0.04, 0.001, p.noiseScale, (v) => c.applyAtmosphereSettings({ cloudNoiseScale: v }));
+    this._slider('Detail', 0, 2, 0.01, p.detailStrength, (v) => c.applyAtmosphereSettings({ cloudDetailStrength: v }));
+    this._slider('Holes', 0, 1, 0.01, p.holes, (v) => c.applyAtmosphereSettings({ cloudHoles: v }));
+    this._slider('Sharpness', 0, 1, 0.01, p.sharpness, (v) => c.applyAtmosphereSettings({ cloudSharpness: v }));
+    this._slider('Wispiness', 0, 1, 0.01, p.wispiness, (v) => c.applyAtmosphereSettings({ cloudWispiness: v }));
 
     this._section('Cloud color');
     this._checkbox('Tint from sun', p.autoTint, (on) => c.applyAtmosphereSettings({ cloudAutoTint: on }));

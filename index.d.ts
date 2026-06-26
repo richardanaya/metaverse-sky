@@ -20,8 +20,6 @@ export interface CloudSettings {
   renderMode: CloudRenderMode;
   altitude: number;
   opacity: number;
-  windSpeed: number;
-  windDirection: number;
   tile: number;
   drawDistance: number;
   cloudColor: THREE.ColorRepresentation;
@@ -29,6 +27,7 @@ export interface CloudSettings {
   coverage: number;
   noiseScale: number;
   detailStrength: number;
+  holes: number;
   sharpness: number;
   wispiness: number;
   darkness: number;
@@ -51,8 +50,6 @@ export interface AtmosphereSettings {
   cloudRenderMode?: CloudRenderMode;
   cloudOpacity?: number;
   cloudAltitude?: number;
-  cloudWindSpeed?: number;
-  cloudWindDirection?: number;
   cloudTile?: number;
   cloudDrawDistance?: number;
   cloudColor?: THREE.ColorRepresentation;
@@ -60,6 +57,7 @@ export interface AtmosphereSettings {
   cloudCoverage?: number;
   cloudNoiseScale?: number;
   cloudDetailStrength?: number;
+  cloudHoles?: number;
   cloudSharpness?: number;
   cloudWispiness?: number;
   cloudDarkness?: number;
@@ -146,8 +144,6 @@ export class CloudSkyLayer {
   getAtmosphereSettings(): AtmosphereSettings;
   applyAtmosphereSettings(data?: AtmosphereSettings): this;
   setSunDirection(direction: THREE.Vector3 | [number, number, number]): this;
-  setWindDirection(direction: [number, number] | THREE.Vector2): this;
-  setWindSpeed(speed: number): this;
   update(deltaTime: number): void;
   dispose(): void;
 }
