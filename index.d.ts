@@ -29,6 +29,7 @@ export interface CloudSettings {
   detailStrength: number;
   holes: number;
   cloudType: number;
+  cloudBanks: number;
   sharpness: number;
   wispiness: number;
   darkness: number;
@@ -60,6 +61,7 @@ export interface AtmosphereSettings {
   cloudDetailStrength?: number;
   cloudHoles?: number;
   cloudType?: number;
+  cloudBanks?: number;
   cloudSharpness?: number;
   cloudWispiness?: number;
   cloudDarkness?: number;

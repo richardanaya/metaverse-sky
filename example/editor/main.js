@@ -44,6 +44,8 @@ const cloudHolesInput = document.querySelector('#cloud-holes');
 const cloudHolesValue = document.querySelector('#cloud-holes-value');
 const cloudTypeInput = document.querySelector('#cloud-type');
 const cloudTypeValue = document.querySelector('#cloud-type-value');
+const cloudBanksInput = document.querySelector('#cloud-banks');
+const cloudBanksValue = document.querySelector('#cloud-banks-value');
 const sharpnessInput = document.querySelector('#sharpness');
 const sharpnessValue = document.querySelector('#sharpness-value');
 const wispinessInput = document.querySelector('#wispiness');
@@ -279,6 +281,11 @@ function bindPanel() {
     return value.toFixed(2);
   });
 
+  bindRange(cloudBanksInput, cloudBanksValue, (value) => {
+    sky.applyAtmosphereSettings({ cloudBanks: value });
+    return value.toFixed(2);
+  });
+
   bindRange(sharpnessInput, sharpnessValue, (value) => {
     sky.applyAtmosphereSettings({ cloudSharpness: value });
     return value.toFixed(2);
@@ -386,6 +393,7 @@ function resetDefaults() {
   setRange(detailStrengthInput, d.detailStrength, detailStrengthValue, (v) => v.toFixed(2));
   setRange(cloudHolesInput, d.holes, cloudHolesValue, (v) => v.toFixed(2));
   setRange(cloudTypeInput, d.cloudType, cloudTypeValue, (v) => v.toFixed(2));
+  setRange(cloudBanksInput, d.cloudBanks, cloudBanksValue, (v) => v.toFixed(2));
   setRange(sharpnessInput, d.sharpness, sharpnessValue, (v) => v.toFixed(2));
   setRange(wispinessInput, d.wispiness, wispinessValue, (v) => v.toFixed(2));
   setRange(windDirectionInput, 255, windDirectionValue, (v) => `${v}°`);
@@ -405,6 +413,7 @@ function resetDefaults() {
     cloudDetailStrength: d.detailStrength,
     cloudHoles: d.holes,
     cloudType: d.cloudType,
+    cloudBanks: d.cloudBanks,
     cloudSharpness: d.sharpness,
     cloudWispiness: d.wispiness,
     cloudDarkness: d.darkness,
