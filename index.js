@@ -551,7 +551,7 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // Combined with the slab-top break below, near-zenith rays finish in ~23
     // effective steps and horizon rays in ~12.
     const distanceFactor = nodeClamp(slabStart.div(u.uRadius), 0.0, 1.0);
-    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.45, distanceFactor));
+    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.3, distanceFactor));
     const verticalStep = initialVerticalStep.toVar();
     const stepLen = initialVerticalStep.div(up).toVar();
     const transmittance = float(1.0).toVar();
@@ -560,7 +560,10 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // pixel coordinates: the sphere uv varies smoothly across the screen, so
     // hashing it gives neighboring pixels nearly the same phase and the step
     // layers alias into coherent wavy bands instead of imperceptible noise.
-    const jitter = fract(sin(dot(screenCoordinate.xy, vec2(12.9898, 78.233))).mul(43758.5453));
+    // Interleaved gradient noise (Jimenez 2014): low-discrepancy per-pixel
+    // pattern designed for ray-march offsets — hides layering far better than
+    // a white-noise hash at the same step count.
+    const jitter = fract(float(52.9829189).mul(fract(dot(screenCoordinate.xy, vec2(0.06711056, 0.00583715)))));
     const depth = slabStart.add(stepLen.mul(mix(0.05, 0.95, jitter))).toVar();
 
     // The entire march is skipped below the horizon (half the sky sphere) and
@@ -622,8 +625,8 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
         });
 
         depth.addAssign(stepLen);
-        stepLen.mulAssign(1.028);
-        verticalStep.mulAssign(1.028);
+        stepLen.mulAssign(1.022);
+        verticalStep.mulAssign(1.022);
       });
     });
 
