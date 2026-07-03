@@ -543,11 +543,14 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // instead of making the camera fly through arbitrary sphere noise.
     const up = max(viewDir.y, float(0.08));
     const slabStart = max(u.uAltitude.sub(cam.y).div(up), float(0.0));
-    // Nubis-style adaptive march: keep small steps nearby, grow the step size
-    // with distance so far/horizon clouds are cheaper and less visibly layered.
+    // Nubis distance-based stepping: start fine at the slab entry and grow the
+    // step geometrically along the ray; far/horizon entries start coarser.
+    // Combined with the slab-top break below, near-zenith rays finish in ~23
+    // effective steps and horizon rays in ~12.
     const distanceFactor = nodeClamp(slabStart.div(u.uRadius), 0.0, 1.0);
-    const adaptiveVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(1.0, 1.18, distanceFactor));
-    const stepLen = adaptiveVerticalStep.div(up);
+    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.9, distanceFactor));
+    const verticalStep = initialVerticalStep.toVar();
+    const stepLen = initialVerticalStep.div(up).toVar();
     const transmittance = float(1.0).toVar();
     const lightEnergy = vec3(0.0).toVar();
     // Stable per-fragment start jitter hides ray-step banding without animated
@@ -560,9 +563,9 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     If(horizonFade.greaterThan(0.001), () => {
       Loop({ start: int(0), end: int(CLOUD_STEPS), type: 'int', name: 'i' }, () => {
         If(transmittance.lessThan(0.015), () => { Break(); });
-        // World-anchored sample point in the fixed altitude layer: no wind/time
-        // morphing, but camera translation sees the same clouds from new angles.
         const p = cam.add(viewDir.mul(depth));
+        // Ray exited the top of the cloud slab — nothing left to accumulate.
+        If(p.y.greaterThan(u.uAltitude.add(u.uThickness)), () => { Break(); });
         const densitySample = sampleCloudDensity(u, p, noise, scale);
         const d = densitySample.fine.mul(horizonFade);
         const coarseD = densitySample.coarse.mul(horizonFade);
@@ -581,7 +584,8 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
           const lightStep = u.uThickness.mul(0.45);
           const toSun1 = cloudLightDensity(u, p.add(sunDir.mul(lightStep)), noise, scale, densitySample.coverageMap);
           const toSun2 = cloudLightDensity(u, p.add(sunDir.mul(lightStep.mul(2.3))), noise, scale, densitySample.coverageMap);
-          const opticalToSun = toSun1.add(toSun2.mul(0.65)).mul(2.4);
+          const toSun3 = cloudLightDensity(u, p.add(sunDir.mul(lightStep.mul(4.6))), noise, scale, densitySample.coverageMap);
+          const opticalToSun = toSun1.add(toSun2.mul(0.65)).add(toSun3.mul(0.4)).mul(2.0);
           const directT = exp(opticalToSun.negate());
           // Beer-powder: thin backlit edges dip dark before brightening — the
           // signature crisp rims of the Nubis model.
@@ -590,7 +594,7 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
           // Nubis multiple-scattering approximation: light that bounces deeper
           // into dense, high, sun-attenuated regions re-emerges as a soft glow
           // (ms_volume from the Nubis Evolved slides).
-          const msVolume = nodeClamp(densitySample.dimensionalProfile.mul(adaptiveVerticalStep).sub(0.1).div(0.9), 0.0, 1.0)
+          const msVolume = nodeClamp(densitySample.dimensionalProfile.mul(verticalStep).sub(0.1).div(0.9), 0.0, 1.0)
             .mul(pow(nodeClamp(u.uCoverage.mul(max(u.uCloudType, 0.05)), 0.0, 1.0), 0.25))
             .mul(pow(directT, 0.6))
             .mul(pow(heightFraction, 0.7));
@@ -607,12 +611,14 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
           // Front-to-back compositing via Beer's law for the view ray.
           // Normalize optical depth by step count instead of raw world distance;
           // raw stepLen made the volume read like opaque paint.
-          const tau = d.mul(adaptiveVerticalStep.div(u.uThickness)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
+          const tau = d.mul(verticalStep.div(u.uThickness)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
           lightEnergy.addAssign(transmittance.mul(stepColor).mul(tau).mul(3.5));
           transmittance.mulAssign(exp(tau.negate()));
         });
 
         depth.addAssign(stepLen);
+        stepLen.mulAssign(1.035);
+        verticalStep.mulAssign(1.035);
       });
     });
 
