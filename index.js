@@ -6,10 +6,10 @@
 
 import * as THREE from 'three/webgpu';
 import {
-  Fn, uniform, texture, attribute,
+  Fn, uniform, texture, instancedBufferAttribute,
   vec2, vec3, vec4, float, int,
   abs, max, min, mix, clamp as nodeClamp, smoothstep as nodeSmoothstep, dot, normalize, length, pow, exp, sin, sqrt, fract, floor, oneMinus,
-  If, Loop, Discard, positionLocal, positionWorld, cameraPosition, uv,
+  If, Loop, Discard, positionLocal, positionWorld, positionView, cameraPosition, uv,
 } from 'three/tsl';
 
 export const DEFAULT_SKY_SCALE = 450;
@@ -1066,35 +1066,49 @@ const PRECIP_DEFAULTS = {
 
 const PRECIP_PROFILES = {
   rain: {
-    color: 0xaecbe0,
-    size: 0.7,
+    color: 0xc4d6e4,
+    size: 0.2,
     speed: 60,
     windDrift: 0.6,
     softness: 0.5,
     slant: 1,
     swirl: 0,
+    streak: 1,
+    // Rain is mostly transparent water: faint in flat light, strongly visible
+    // when backlit by the sun (forward scatter).
+    alpha: 0.55,
+    backlight: 1.1,
+    flutter: 0,
   },
   snow: {
-    color: 0xf6fbff,
-    size: 0.8,
+    color: 0xffffff,
+    size: 0.28,
     speed: 8,
     windDrift: 1.4,
     softness: 0.18,
     slant: 0.2,
     swirl: 1,
+    streak: 0,
+    alpha: 0.9,
+    backlight: 0.45,
+    flutter: 1,
   },
   hail: {
     color: 0xdce8f2,
-    size: 0.5,
+    size: 0.16,
     speed: 40,
     windDrift: 0.3,
     softness: 0.08,
     slant: 0.1,
     swirl: 0,
+    streak: 0.35,
+    alpha: 0.8,
+    backlight: 0.6,
+    flutter: 0.15,
   },
 };
 
-const PRECIP_MAX = 4000;
+const PRECIP_MAX = 6000;
 const PRECIP_BOX = { w: 220, h: 140, d: 220 };
 
 export class Precipitation {
@@ -1121,6 +1135,8 @@ export class Precipitation {
     this._time = 0;
     this._windX = 0;
     this._windZ = 0;
+    this._camRight = new THREE.Vector3();
+    this._sunViewDir = new THREE.Vector3(0, 1, 0);
     this._textures = {};
     this._textureLoader = null;
     this._ready = false;
@@ -1132,11 +1148,11 @@ export class Precipitation {
 
   init() {
     if (this._ready) return this;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(this._pos, 3));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(this._seed, 1));
-    geo.setAttribute('aSize', new THREE.BufferAttribute(this._size, 1));
-    geo.setDrawRange(0, 0);
+    // WebGPU renders THREE.Points as 1px primitives, so sized particles must
+    // be an instanced THREE.Sprite driven by per-instance attributes.
+    this._posAttr = new THREE.InstancedBufferAttribute(this._pos, 3).setUsage(THREE.DynamicDrawUsage);
+    this._seedAttr = new THREE.InstancedBufferAttribute(this._seed, 1).setUsage(THREE.DynamicDrawUsage);
+    this._sizeAttr = new THREE.InstancedBufferAttribute(this._size, 1).setUsage(THREE.DynamicDrawUsage);
 
     this._defaultPrecipTexture = createSolidTexture(255, 255, 255, 255);
     this._pointMat = new THREE.PointsNodeMaterial();
@@ -1150,6 +1166,9 @@ export class Precipitation {
       uColor: assignUniform(this._pointMat, 'uColor', uniform(new THREE.Color(0xffffff))),
       uSunColor: assignUniform(this._pointMat, 'uSunColor', uniform(new THREE.Color(0xfff0d2))),
       uSunFactor: assignUniform(this._pointMat, 'uSunFactor', uniform(0)),
+      uSunDirView: assignUniform(this._pointMat, 'uSunDirView', uniform(new THREE.Vector3(0, 1, 0))),
+      uDayFactor: assignUniform(this._pointMat, 'uDayFactor', uniform(1)),
+      uBacklight: assignUniform(this._pointMat, 'uBacklight', uniform(0)),
       uFogColor: assignUniform(this._pointMat, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
       uFogNear: assignUniform(this._pointMat, 'uFogNear', uniform(60)),
       uFogFar: assignUniform(this._pointMat, 'uFogFar', uniform(360)),
@@ -1161,29 +1180,77 @@ export class Precipitation {
       uFadeFar: assignUniform(this._pointMat, 'uFadeFar', uniform(360)),
       uTime: assignUniform(this._pointMat, 'uTime', uniform(0)),
       uTwinkle: assignUniform(this._pointMat, 'uTwinkle', uniform(0)),
+      uStreak: assignUniform(this._pointMat, 'uStreak', uniform(0)),
+      uTilt: assignUniform(this._pointMat, 'uTilt', uniform(0)),
     };
-    const aSeed = attribute('aSeed', 'float');
-    const aSize = attribute('aSize', 'float');
-    const dist = length(cameraPosition.sub(positionWorld));
-    const fade = oneMinus(nodeSmoothstep(u.uFadeNear, u.uFadeFar, dist));
-    this._pointMat.scaleNode = aSize.mul(u.uSizeScale).mul(float(340.0).div(max(dist, 1.0)));
+    const aSeed = instancedBufferAttribute(this._seedAttr);
+    const aSize = instancedBufferAttribute(this._sizeAttr);
+    // Per-instance world position; the sprite object itself stays at origin.
+    this._pointMat.positionNode = instancedBufferAttribute(this._posAttr);
+    // Sprite center in view space — constant per instance, usable in fragment.
+    const dist = length(positionView);
+    // Fade far particles out, and fade very-near ones too — a drop crossing
+    // right in front of the lens would otherwise fill the screen as a giant
+    // readable billboard.
+    const fade = oneMinus(nodeSmoothstep(u.uFadeNear, u.uFadeFar, dist)).mul(nodeSmoothstep(1.5, 5.0, dist));
+    // World-space particle size; streaking particles get a larger sprite to
+    // hold the elongated shape. rotationNode slants the whole quad toward the
+    // screen-space fall direction (gravity plus projected wind drift).
+    this._pointMat.sizeNode = aSize.mul(u.uSizeScale).mul(u.uStreak.mul(0.9).add(1.0));
+    this._pointMat.rotationNode = u.uTilt;
     this._pointMat.fragmentNode = Fn(() => {
       const c = uv().sub(0.5);
-      const r = length(c);
-      const proceduralAlpha = nodeSmoothstep(0.5, float(0.5).sub(u.uSoftness), r);
-      const tex = texture(u.uTexture, uv());
-      const shapeAlpha = u.uTextureEnabled.greaterThan(0.5).select(tex.a, proceduralAlpha);
+      const streak = nodeClamp(u.uStreak, 0.0, 1.5);
+      const streak01 = nodeClamp(streak, 0.0, 1.0);
+
+      // Procedural shape: a capsule that reads as a round drop at streak=0 and
+      // a thin motion-blurred rain streak at streak=1.
+      const halfLen = streak.mul(0.34);
+      const dCap = length(vec2(c.x, max(abs(c.y).sub(halfLen), 0.0)));
+      const width = mix(float(0.5), float(0.10), streak01);
+      const inner = max(width.sub(u.uSoftness.mul(mix(1.0, 0.3, streak01))), 0.005);
+      const tipFade = mix(
+        float(1.0),
+        oneMinus(nodeSmoothstep(0.05, halfLen.add(width), abs(c.y))).mul(0.8).add(0.2),
+        streak01,
+      );
+      const proceduralAlpha = nodeSmoothstep(width, inner, dCap).mul(tipFade);
+
+      // Textured sprites get a horizontal squeeze so rain art elongates with
+      // the streak (the quad rotation comes from rotationNode). Mask outside
+      // the squeezed bounds so clamped edge texels never smear.
+      const stretch = streak.mul(1.2).add(1.0);
+      const tuv = vec2(c.x.mul(stretch), c.y).add(0.5);
+      const inBounds = oneMinus(nodeSmoothstep(0.475, 0.5, max(abs(tuv.x.sub(0.5)), abs(tuv.y.sub(0.5)))));
+      const tex = texture(u.uTexture, tuv);
+      const shapeAlpha = u.uTextureEnabled.greaterThan(0.5).select(tex.a.mul(inBounds), proceduralAlpha);
       const texColor = u.uTextureEnabled.greaterThan(0.5).select(tex.rgb, vec3(1.0));
       If(shapeAlpha.lessThan(0.01), () => { Discard(); });
       const twinkle = oneMinus(u.uTwinkle).add(u.uTwinkle.mul(float(0.55).add(sin(u.uTime.mul(3.0).add(aSeed.mul(50.0))).mul(0.45))));
-      let col = u.uColor.mul(texColor).add(u.uSunColor.mul(u.uSunFactor).mul(0.35));
+
+      // Multiplicative lighting model: particles are lit by a sky-tinted
+      // ambient plus sunlight, so they dim at night and inherit scene mood
+      // instead of glowing a fixed tint.
+      const backlit = pow(max(dot(normalize(positionView), normalize(u.uSunDirView)), 0.0), 6.0).mul(u.uBacklight);
+      const ambient = mix(vec3(0.9), u.uFogColor, 0.45);
+      const sunLight = u.uSunColor.mul(u.uSunFactor.mul(0.5).add(backlit.mul(0.9)));
+      let col = u.uColor.mul(texColor).mul(ambient.add(sunLight)).mul(u.uDayFactor);
       const ff = nodeSmoothstep(u.uFogNear, u.uFogFar, dist).mul(u.uFogEnabled);
       col = mix(col, u.uFogColor, ff.mul(0.7));
-      const alpha = shapeAlpha.mul(u.uOpacity).mul(fade).mul(twinkle).mul(oneMinus(ff.mul(0.5)));
+      // Per-particle brightness variation plus backlit visibility boost:
+      // precipitation reads much stronger looking toward the sun.
+      const sparkle = float(0.8).add(aSeed.mul(0.4));
+      const alpha = shapeAlpha.mul(u.uOpacity).mul(fade).mul(twinkle).mul(sparkle)
+        .mul(float(1.0).add(backlit.mul(0.5)))
+        .mul(oneMinus(ff.mul(0.5)));
       return vec4(col, alpha);
     })();
-    this._points = new THREE.Points(geo, this._pointMat);
+    this._points = new THREE.Sprite(this._pointMat);
+    this._points.count = 0;
     this._points.frustumCulled = false;
+    // Draw after the volumetric clouds (renderOrder 2) so near rain composites
+    // over the far cloud layer instead of under it.
+    this._points.renderOrder = 3;
     this._group.add(this._points);
 
     this._ready = true;
@@ -1272,17 +1339,22 @@ export class Precipitation {
     const fogOn = fog ? 1 : 0;
     let sunFactor = 0;
     let sunColor = 0xfff0d2;
+    let day = 1;
     if (this.sky) {
       const sun = this.sky.material.uniforms.sunPosition.value;
       const sunY = clamp(sun.y, -0.1, 1);
-      sunFactor = sunY * 0.6;
+      sunFactor = Math.max(0, sunY) * 0.6;
+      day = smoothstep(-0.06, 0.25, sunY);
       const warmth = 1 - smoothstep(0.12, 0.62, sunY);
       const c = new THREE.Color(0xffffff).lerp(new THREE.Color(0xffb36f), warmth * 0.55);
       sunColor = c.getHex();
+      this._sunViewDir.copy(sun).normalize().transformDirection(this.camera.matrixWorldInverse);
     }
     const pu = this._pointMat.uniforms;
     pu.uSunColor.value.setHex(sunColor);
     pu.uSunFactor.value = sunFactor;
+    pu.uSunDirView.value.copy(this._sunViewDir);
+    pu.uDayFactor.value = 0.12 + 0.88 * day;
     pu.uFogEnabled.value = fogOn;
     if (fog) {
       pu.uFogColor.value.copy(fog.color);
@@ -1300,7 +1372,9 @@ export class Precipitation {
     this._group.visible = true;
     const prof = this._profile;
 
-    const wantActive = Math.floor(PRECIP_MAX * env);
+    // Intensity can exceed 1 (editor slider goes to 3); never spawn past the
+    // allocated instance buffers.
+    const wantActive = Math.min(PRECIP_MAX, Math.floor(PRECIP_MAX * env));
     const cam = this.camera.position;
     while (this._active < wantActive) {
       this._spawn(this._active, true, cam);
@@ -1315,10 +1389,14 @@ export class Precipitation {
     const driftMul = prof.windDrift * this.params.windDrift;
     const windSpeed = this._windSpeed || 0;
     const windMag = windSpeed * 30 * driftMul;
-    const wx = this._windX * windMag;
-    const wz = this._windZ * windMag;
-    const swirl = prof.swirl;
     const t = this._time;
+    // Gusting: the wind breathes on two slow frequencies instead of pushing
+    // with a constant force. Never reverses (factor stays in ~[0.4, 1.6]).
+    const gust = 1 + Math.sin(t * 0.5) * 0.35 + Math.sin(t * 0.13 + 1.7) * 0.25;
+    const wx = this._windX * windMag * gust;
+    const wz = this._windZ * windMag * gust;
+    const swirl = prof.swirl;
+    const flutter = prof.flutter ?? 0;
 
     const pos = this._pos;
     const bx = b.w * 0.5;
@@ -1334,11 +1412,17 @@ export class Precipitation {
       let vx = wx;
       let vz = wz;
       if (swirl > 0) {
-        vx += Math.sin(t * 1.2 + seed * 31) * swirl * 4;
-        vz += Math.cos(t * 0.9 + seed * 17) * swirl * 4;
+        // Two-frequency meander: a slow drift with a faster wobble on top
+        // reads as fluttering flakes instead of synchronized pendulums.
+        vx += (Math.sin(t * 1.3 + seed * 37) + 0.5 * Math.sin(t * 2.7 + seed * 61)) * swirl * 3.2;
+        vz += (Math.cos(t * 1.1 + seed * 23) + 0.5 * Math.cos(t * 2.3 + seed * 47)) * swirl * 3.2;
       }
+      let vy = fallSpeed * (0.8 + seed * 0.4);
+      // Flutter: flakes momentarily hang and then drop, instead of descending
+      // at a perfectly constant rate.
+      if (flutter > 0) vy *= 1 + Math.sin(t * 1.9 + seed * 43) * 0.35 * flutter;
       pos[ix] += vx * dt;
-      pos[iy] -= fallSpeed * (0.8 + seed * 0.4) * dt;
+      pos[iy] -= vy * dt;
       pos[iz] += vz * dt;
 
       const relx = pos[ix] - cam.x;
@@ -1356,7 +1440,16 @@ export class Precipitation {
 
     const sizeScale = prof.size * this.params.size;
     const tex = this._textures[this.params.type];
-    const opacity = env;
+    const opacity = env * (prof.alpha ?? 1);
+    this._pointMat.uniforms.uBacklight.value = prof.backlight ?? 0;
+    // Screen-space slant: project the horizontal wind drift onto the camera's
+    // right axis and tilt the sprite toward the resulting fall direction. The
+    // drift is exaggerated (x4) so slanting rain reads at gentle wind speeds.
+    this._camRight.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    const screenDrift = (wx * this._camRight.x + wz * this._camRight.z) * 4;
+    this._pointMat.uniforms.uTilt.value = Math.atan2(screenDrift, Math.max(fallSpeed, 0.001)) * prof.slant;
+    // Faster fall stretches the streaks, like a longer motion-blur exposure.
+    this._pointMat.uniforms.uStreak.value = prof.streak * clamp(0.5 + this.params.speed * 0.5, 0.5, 1.5);
     this._pointMat.uniforms.uColor.value.setHex(prof.color);
     this._pointMat.uniforms.uOpacity.value = opacity;
     this._pointMat.uniforms.uSizeScale.value = sizeScale;
@@ -1369,10 +1462,12 @@ export class Precipitation {
     } else {
       this._pointMat.uniforms.uTextureEnabled.value = 0;
     }
-    this._points.geometry.setDrawRange(0, this._active);
-    this._points.geometry.getAttribute('position').needsUpdate = true;
-    this._points.geometry.getAttribute('aSeed').needsUpdate = true;
-    this._points.geometry.getAttribute('aSize').needsUpdate = true;
+    // A zero instance count skips the draw during the fade-in ramp.
+    this._points.count = this._active;
+    this._points.visible = this._active > 0;
+    this._posAttr.needsUpdate = true;
+    this._seedAttr.needsUpdate = true;
+    this._sizeAttr.needsUpdate = true;
   }
 
   update(dt) {
@@ -1386,7 +1481,8 @@ export class Precipitation {
   dispose() {
     if (!this._ready) return;
     this.scene.remove(this._group);
-    this._points.geometry.dispose();
+    // Note: the sprite's quad geometry is shared by all THREE.Sprite instances
+    // and must not be disposed here.
     this._pointMat.dispose();
     this._ready = false;
   }
