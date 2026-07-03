@@ -9,6 +9,8 @@ const sunAzimuthInput = document.querySelector('#sun-azimuth');
 const sunElevationInput = document.querySelector('#sun-elevation');
 const sunAzimuthValue = document.querySelector('#sun-azimuth-value');
 const sunElevationValue = document.querySelector('#sun-elevation-value');
+const sunSizeInput = document.querySelector('#sun-size');
+const sunSizeValue = document.querySelector('#sun-size-value');
 const iblMinInput = document.querySelector('#ibl-min');
 const iblMaxInput = document.querySelector('#ibl-max');
 const iblMinValue = document.querySelector('#ibl-min-value');
@@ -259,6 +261,11 @@ function bindPanel() {
   bindRange(cloudTypeInput, cloudTypeValue, (value) => {
     sky.applyAtmosphereSettings({ cloudType: value });
     return value.toFixed(2);
+  });
+
+  bindRange(sunSizeInput, sunSizeValue, (value) => {
+    sky.setSunSize(value);
+    return `${value.toFixed(2)}x`;
   });
 
   bindRange(windDirectionInput, windDirectionValue, (value) => {

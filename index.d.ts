@@ -51,6 +51,7 @@ export interface AtmosphereSettings {
   exposure?: number;
   envIntensityMin?: number;
   envIntensityMax?: number;
+  sunSize?: number;
   sunPosition?: [number, number, number] | THREE.Vector3;
   cloudsEnabled?: boolean;
   cloudRenderMode?: CloudRenderMode;
@@ -214,6 +215,9 @@ export class MetaverseSky {
 
   setSun(elevation?: number, azimuth?: number): this;
   setSunDirection(direction: THREE.Vector3 | [number, number, number]): this;
+  /** Visual sun disc size multiplier (1 = default). */
+  setSunSize(scale: number): this;
+  getSunSize(): number;
 
   setWind(directionOrAngle: number | [number, number] | THREE.Vector2, speed?: number): this;
   setWindDirection(direction: [number, number] | THREE.Vector2): this;
@@ -244,6 +248,7 @@ export interface SkyEditorOptions {
   light?: THREE.Light | null;
   renderer?: THREE.WebGLRenderer;
   clouds?: CloudSkyLayer | null;
+  sunBall?: THREE.Object3D | null;
   onSunChange?: (() => void) | null;
   envIntensityMin?: number;
   envIntensityMax?: number;
@@ -254,6 +259,7 @@ export class SkyEditor {
   light: THREE.Light | null;
   renderer?: THREE.WebGLRenderer;
   clouds: CloudSkyLayer | null;
+  sunBall: THREE.Object3D | null;
   elevation: number;
   azimuth: number;
   envIntensityMin: number;

@@ -6,10 +6,10 @@
 
 import * as THREE from 'three/webgpu';
 import {
-  Fn, uniform, texture, instancedBufferAttribute,
+  Fn, uniform, texture, texture3D, instancedBufferAttribute,
   vec2, vec3, vec4, float, int,
-  abs, max, min, mix, clamp as nodeClamp, smoothstep as nodeSmoothstep, dot, normalize, length, pow, exp, sin, sqrt, fract, floor, oneMinus,
-  If, Loop, Discard, positionLocal, positionWorld, positionView, cameraPosition, uv,
+  abs, max, min, mix, clamp as nodeClamp, smoothstep as nodeSmoothstep, dot, normalize, length, pow, exp, sin, sqrt, fract, oneMinus,
+  If, Loop, Break, Discard, positionLocal, positionWorld, positionView, cameraPosition, uv,
 } from 'three/tsl';
 
 export const DEFAULT_SKY_SCALE = 450;
@@ -40,12 +40,12 @@ const CLOUD_DEFAULTS = {
   drawDistance: 420,
   cloudColor: new THREE.Color(0xf2f6fc),
   autoTint: true,
-  coverage: 0.5,
+  coverage: 0.65,
   noiseScale: 0.012,
   detailStrength: 0,
   holes: 0.5,
   cloudType: 0.55,
-  cloudBanks: 0.45,
+  cloudBanks: 0.6,
   sharpness: 0.35,
   wispiness: 0.45,
   darkness: 0,
@@ -161,32 +161,85 @@ const _GRAD = [
   [1, 1, -1], [-1, 1, -1], [1, -1, -1], [-1, -1, -1],
 ];
 
-function gradDot(hash, dx, dy, dz) {
-  const g = _GRAD[Math.floor(hash * _GRAD.length) % _GRAD.length];
-  return g[0] * dx + g[1] * dy + g[2] * dz;
-}
-
 function smooth3(t) {
   return t * t * (3 - 2 * t);
 }
 
+// Per-octave lookup tables: gradients / Worley feature offsets only depend on
+// the wrapped cell index, so precomputing them once per octave removes nearly
+// all hash work from the bake's hot loops.
+const _gradTables = new Map();
+const _featTables = new Map();
+const _wrapTables = new Map();
+
+// wrap[v + 1] === tmod(v, cells) for v in [-1, cells + 1] — replaces modulo
+// arithmetic in the bake's hot loops.
+function getWrapTable(cells) {
+  let tbl = _wrapTables.get(cells);
+  if (tbl) return tbl;
+  tbl = new Int32Array(cells + 3);
+  for (let v = -1; v <= cells + 1; v++) tbl[v + 1] = tmod(v, cells);
+  _wrapTables.set(cells, tbl);
+  return tbl;
+}
+
+function getGradTable(cells) {
+  let tbl = _gradTables.get(cells);
+  if (tbl) return tbl;
+  tbl = new Uint8Array(cells * cells * cells);
+  let i = 0;
+  for (let z = 0; z < cells; z++) {
+    for (let y = 0; y < cells; y++) {
+      for (let x = 0; x < cells; x++) {
+        tbl[i++] = Math.floor(hash31(x, y, z) * _GRAD.length) % _GRAD.length;
+      }
+    }
+  }
+  _gradTables.set(cells, tbl);
+  return tbl;
+}
+
+function getFeatTable(cells) {
+  let tbl = _featTables.get(cells);
+  if (tbl) return tbl;
+  tbl = new Float32Array(cells * cells * cells * 3);
+  let i = 0;
+  for (let z = 0; z < cells; z++) {
+    for (let y = 0; y < cells; y++) {
+      for (let x = 0; x < cells; x++) {
+        tbl[i++] = hash31(x, y, z);
+        tbl[i++] = hash31(y, z, x);
+        tbl[i++] = hash31(z, x, y);
+      }
+    }
+  }
+  _featTables.set(cells, tbl);
+  return tbl;
+}
+
 // Proper gradient (Perlin) 3D noise — smooth and free of value-noise blockiness.
-// `tile` is the lattice period; lattice points wrap modulo it so the result is
-// seamlessly tileable (matching at x=0 and x=tile).
-function perlin3(x, y, z, tile) {
+// `cells` is the lattice period; lattice points wrap modulo it so the result is
+// seamlessly tileable.
+function perlin3(x, y, z, cells, grad, wrap) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const xf = x - xi, yf = y - yi, zf = z - zi;
   const u = smooth3(xf), v = smooth3(yf), w = smooth3(zf);
-  const wx0 = tmod(xi, tile), wy0 = tmod(yi, tile), wz0 = tmod(zi, tile);
-  const wx1 = tmod(xi + 1, tile), wy1 = tmod(yi + 1, tile), wz1 = tmod(zi + 1, tile);
-  const g000 = hash31(wx0, wy0, wz0), g100 = hash31(wx1, wy0, wz0);
-  const g010 = hash31(wx0, wy1, wz0), g110 = hash31(wx1, wy1, wz0);
-  const g001 = hash31(wx0, wy0, wz1), g101 = hash31(wx1, wy0, wz1);
-  const g011 = hash31(wx0, wy1, wz1), g111 = hash31(wx1, wy1, wz1);
-  const d000 = gradDot(g000, xf, yf, zf), d100 = gradDot(g100, xf - 1, yf, zf);
-  const d010 = gradDot(g010, xf, yf - 1, zf), d110 = gradDot(g110, xf - 1, yf - 1, zf);
-  const d001 = gradDot(g001, xf, yf, zf - 1), d101 = gradDot(g101, xf - 1, yf, zf - 1);
-  const d011 = gradDot(g011, xf, yf - 1, zf - 1), d111 = gradDot(g111, xf - 1, yf - 1, zf - 1);
+  const wx0 = wrap[xi + 1], wy0 = wrap[yi + 1], wz0 = wrap[zi + 1];
+  const wx1 = wrap[xi + 2], wy1 = wrap[yi + 2], wz1 = wrap[zi + 2];
+  const row0 = wy0 * cells, row1 = wy1 * cells;
+  const slab0 = wz0 * cells * cells, slab1 = wz1 * cells * cells;
+  const g000 = _GRAD[grad[wx0 + row0 + slab0]], g100 = _GRAD[grad[wx1 + row0 + slab0]];
+  const g010 = _GRAD[grad[wx0 + row1 + slab0]], g110 = _GRAD[grad[wx1 + row1 + slab0]];
+  const g001 = _GRAD[grad[wx0 + row0 + slab1]], g101 = _GRAD[grad[wx1 + row0 + slab1]];
+  const g011 = _GRAD[grad[wx0 + row1 + slab1]], g111 = _GRAD[grad[wx1 + row1 + slab1]];
+  const d000 = g000[0] * xf + g000[1] * yf + g000[2] * zf;
+  const d100 = g100[0] * (xf - 1) + g100[1] * yf + g100[2] * zf;
+  const d010 = g010[0] * xf + g010[1] * (yf - 1) + g010[2] * zf;
+  const d110 = g110[0] * (xf - 1) + g110[1] * (yf - 1) + g110[2] * zf;
+  const d001 = g001[0] * xf + g001[1] * yf + g001[2] * (zf - 1);
+  const d101 = g101[0] * (xf - 1) + g101[1] * yf + g101[2] * (zf - 1);
+  const d011 = g011[0] * xf + g011[1] * (yf - 1) + g011[2] * (zf - 1);
+  const d111 = g111[0] * (xf - 1) + g111[1] * (yf - 1) + g111[2] * (zf - 1);
   const x00 = d000 + (d100 - d000) * u, x10 = d010 + (d110 - d010) * u;
   const x01 = d001 + (d101 - d001) * u, x11 = d011 + (d111 - d011) * u;
   const y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
@@ -194,7 +247,7 @@ function perlin3(x, y, z, tile) {
   return y0 + (y1 - y0) * w + 0.5;
 }
 
-function worley3(x, y, z, tile) {
+function worley3(x, y, z, cells, feat, wrap) {
   // Inverted Worley: 1 near cell feature points, 0 between. Tileable: feature
   // points live inside wrapped cells so the field matches at boundaries.
   let minD = 1e9;
@@ -202,15 +255,13 @@ function worley3(x, y, z, tile) {
   for (let dz = -1; dz <= 1; dz++) {
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
-        const cx = tmod(xi + dx, tile), cy = tmod(yi + dy, tile), cz = tmod(zi + dz, tile);
-        const fx = cx + hash31(cx, cy, cz);
-        const fy = cy + hash31(cy, cz, cx);
-        const fz = cz + hash31(cz, cx, cy);
+        const cx = wrap[xi + dx + 1], cy = wrap[yi + dy + 1], cz = wrap[zi + dz + 1];
+        const fi = (cx + cy * cells + cz * cells * cells) * 3;
         // Use unwrapped coordinates for the distance check so crossing the edge
         // still measures true distance to the (wrapped) feature point.
-        const ddx = (xi + dx) + hash31(cx, cy, cz) - x;
-        const ddy = (yi + dy) + hash31(cy, cz, cx) - y;
-        const ddz = (zi + dz) + hash31(cz, cx, cy) - z;
+        const ddx = (xi + dx) + feat[fi] - x;
+        const ddy = (yi + dy) + feat[fi + 1] - y;
+        const ddz = (zi + dz) + feat[fi + 2] - z;
         const d = ddx * ddx + ddy * ddy + ddz * ddz;
         if (d < minD) minD = d;
       }
@@ -219,55 +270,91 @@ function worley3(x, y, z, tile) {
   return 1 - clamp(Math.sqrt(minD), 0, 1);
 }
 
-// FBM over the tileable noise. `tile` is the lattice period; octaves use integer
-// frequency multipliers that divide the period so each octave stays tileable.
-function fbmPerlin(x, y, z, octaves, tile) {
-  let total = 0, amp = 0.5, freq = 1, max = 0;
+// FBM over the tileable noise. Inputs are normalized [0,1) coordinates within
+// one texture period; `baseCells` is the number of lattice cells across that
+// period for the first octave. Each octave doubles the cell count (staying an
+// integer, so every octave tiles seamlessly).
+function fbmPerlin(x, y, z, octaves, baseCells) {
+  let total = 0, amp = 0.5, cells = baseCells, max = 0;
   for (let i = 0; i < octaves; i++) {
-    total += perlin3(x * freq, y * freq, z * freq, tile / freq) * amp;
+    total += perlin3(x * cells, y * cells, z * cells, cells, getGradTable(cells), getWrapTable(cells)) * amp;
     max += amp;
-    freq *= 2;
+    cells *= 2;
     amp *= 0.5;
   }
   return total / max;
 }
 
-function fbmWorley(x, y, z, octaves, tile) {
-  let total = 0, amp = 0.5, freq = 1, max = 0;
+function fbmWorley(x, y, z, octaves, baseCells) {
+  let total = 0, amp = 0.5, cells = baseCells, max = 0;
   for (let i = 0; i < octaves; i++) {
-    total += worley3(x * freq, y * freq, z * freq, tile / freq) * amp;
+    total += worley3(x * cells, y * cells, z * cells, cells, getFeatTable(cells), getWrapTable(cells)) * amp;
     max += amp;
-    freq *= 2;
+    cells *= 2;
     amp *= 0.5;
   }
   return total / max;
 }
 
-const CLOUD_NOISE_SIZE = 128;
+const CLOUD_NOISE_SIZE = 64;
 
 let _cloudNoiseTexture = null;
 
 function getCloudNoiseTexture() {
   if (_cloudNoiseTexture) return _cloudNoiseTexture;
   const size = CLOUD_NOISE_SIZE;
-  const data = new Uint8Array(size * size * size);
+  // Two channels: R = Perlin-Worley shape composite, G = Worley detail for
+  // edge erosion. Baking these once means the ray march does cheap trilinear
+  // texture fetches instead of evaluating procedural noise per step.
+  const voxels = size * size * size;
+  const shapeF = new Float32Array(voxels);
+  const worleyF = new Float32Array(voxels);
+  let shapeMin = Infinity;
+  let shapeMax = -Infinity;
+  let i = 0;
   for (let z = 0; z < size; z++) {
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
-        // Sample the tileable noise in lattice space (texel coords), so the
-        // 3D texture is seamlessly periodic with period `size`.
-        const perlin = fbmPerlin(x, y, z, 3, size);
-        const worley = fbmWorley(x, y, z, 2, size);
+        // Normalized coordinates within the (periodic) texture volume. Perlin
+        // uses 4 base cells per period for large billowy masses; Worley uses 6
+        // for the smaller cellular puffs carved out of them.
+        const nx = x / size;
+        const ny = y / size;
+        const nz = z / size;
+        const perlin = fbmPerlin(nx, ny, nz, 4, 4);
+        const worley = fbmWorley(nx, ny, nz, 2, 6);
         // Perlin-Worley: Perlin gives the billowy base, Worley carves cells.
-        let n = perlin * 0.6 + worley * 0.4;
-        // Bias the field so smooth thresholding yields soft gradients.
-        n = clamp(n, 0, 1);
-        data[x + y * size + z * size * size] = Math.round(n * 255);
+        const shape = perlin * 0.45 + (perlin * worley + worley * 0.25) * 0.55;
+        shapeF[i] = shape;
+        worleyF[i] = worley;
+        if (shape < shapeMin) shapeMin = shape;
+        if (shape > shapeMax) shapeMax = shape;
+        i += 1;
       }
     }
   }
+  // FBM sums cluster in a narrow bell curve, which makes coverage thresholds
+  // nearly inert. Histogram-equalize the shape channel to a uniform [0,1]
+  // distribution so the coverage slider has a predictable, near-linear bite.
+  const shapeRange = Math.max(1e-6, shapeMax - shapeMin);
+  const hist = new Uint32Array(256);
+  for (let v = 0; v < voxels; v++) {
+    hist[Math.min(255, Math.floor(((shapeF[v] - shapeMin) / shapeRange) * 256))] += 1;
+  }
+  const cdf = new Float32Array(256);
+  let acc = 0;
+  for (let b = 0; b < 256; b++) {
+    acc += hist[b];
+    cdf[b] = acc / voxels;
+  }
+  const data = new Uint8Array(voxels * 2);
+  for (let v = 0; v < voxels; v++) {
+    const bin = Math.min(255, Math.floor(((shapeF[v] - shapeMin) / shapeRange) * 256));
+    data[v * 2] = Math.round(cdf[bin] * 255);
+    data[v * 2 + 1] = Math.round(clamp(worleyF[v], 0, 1) * 255);
+  }
   const tex = new THREE.Data3DTexture(data, size, size, size);
-  tex.format = THREE.RedFormat;
+  tex.format = THREE.RGFormat;
   tex.type = THREE.UnsignedByteType;
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
@@ -290,76 +377,12 @@ function getCloudNoiseTexture() {
 // position relative to the camera). Because the noise is camera-anchored the
 // cloud pattern is fixed to the sky (it follows the viewer like a sky dome),
 // so it never swims and is visible from any camera angle.
-// Article-style procedural 3D noise: hash -> value noise -> FBM. This removes
-// the interim 3D texture path, which was reading as static/noisy in WebGL/WebGPU.
-const cloudHash3 = Fn(([p]) => {
-  const q = fract(p.mul(vec3(0.1031, 0.1130, 0.0973)));
-  const r = dot(q, q.yzx.add(33.33));
-  return fract(vec3(q.x.add(q.y).mul(q.z).add(r), q.y.add(q.z).mul(q.x).add(r), q.z.add(q.x).mul(q.y).add(r)));
-});
-
-const cloudNoise3 = Fn(([p]) => {
-  const i = floor(p);
-  const f = fract(p);
-  const u = f.mul(f).mul(vec3(3.0).sub(f.mul(2.0)));
-  const n000 = cloudHash3(i.add(vec3(0.0, 0.0, 0.0))).x;
-  const n100 = cloudHash3(i.add(vec3(1.0, 0.0, 0.0))).x;
-  const n010 = cloudHash3(i.add(vec3(0.0, 1.0, 0.0))).x;
-  const n110 = cloudHash3(i.add(vec3(1.0, 1.0, 0.0))).x;
-  const n001 = cloudHash3(i.add(vec3(0.0, 0.0, 1.0))).x;
-  const n101 = cloudHash3(i.add(vec3(1.0, 0.0, 1.0))).x;
-  const n011 = cloudHash3(i.add(vec3(0.0, 1.0, 1.0))).x;
-  const n111 = cloudHash3(i.add(vec3(1.0, 1.0, 1.0))).x;
-  const x00 = mix(n000, n100, u.x);
-  const x10 = mix(n010, n110, u.x);
-  const x01 = mix(n001, n101, u.x);
-  const x11 = mix(n011, n111, u.x);
-  const y0 = mix(x00, x10, u.y);
-  const y1 = mix(x01, x11, u.y);
-  return mix(y0, y1, u.z).mul(2.0).sub(1.0);
-});
-
-const cloudWorley3 = Fn(([p]) => {
-  // Cheap 2x2x2-cell inverted Worley. Not full Nubis texture data, but gives
-  // cellular erosion/detail without adding FBM octaves.
-  const i = floor(p);
-  const f = fract(p);
-  const d = float(10.0).toVar();
-
-  const w000 = cloudHash3(i.add(vec3(0.0, 0.0, 0.0))).sub(f.sub(vec3(0.0, 0.0, 0.0)));
-  const w100 = cloudHash3(i.add(vec3(1.0, 0.0, 0.0))).add(vec3(1.0, 0.0, 0.0)).sub(f);
-  const w010 = cloudHash3(i.add(vec3(0.0, 1.0, 0.0))).add(vec3(0.0, 1.0, 0.0)).sub(f);
-  const w110 = cloudHash3(i.add(vec3(1.0, 1.0, 0.0))).add(vec3(1.0, 1.0, 0.0)).sub(f);
-  const w001 = cloudHash3(i.add(vec3(0.0, 0.0, 1.0))).add(vec3(0.0, 0.0, 1.0)).sub(f);
-  const w101 = cloudHash3(i.add(vec3(1.0, 0.0, 1.0))).add(vec3(1.0, 0.0, 1.0)).sub(f);
-  const w011 = cloudHash3(i.add(vec3(0.0, 1.0, 1.0))).add(vec3(0.0, 1.0, 1.0)).sub(f);
-  const w111 = cloudHash3(i.add(vec3(1.0, 1.0, 1.0))).add(vec3(1.0, 1.0, 1.0)).sub(f);
-
-  d.assign(min(d, dot(w000, w000)));
-  d.assign(min(d, dot(w100, w100)));
-  d.assign(min(d, dot(w010, w010)));
-  d.assign(min(d, dot(w110, w110)));
-  d.assign(min(d, dot(w001, w001)));
-  d.assign(min(d, dot(w101, w101)));
-  d.assign(min(d, dot(w011, w011)));
-  d.assign(min(d, dot(w111, w111)));
-
-  return oneMinus(nodeClamp(sqrt(d), 0.0, 1.0));
-});
-
-const cloudFbm = Fn(([p]) => {
-  // Keep the helper name for call sites, but avoid runtime FBM loops. Nubis-style
-  // structure comes from separate macro/body/detail fields + vertical profile,
-  // not lots of procedural octaves in the fragment shader.
-  return cloudNoise3(p);
-});
-
-// Returns vec2(fineDensity, coarseDensity). `p` is world-space inside the fixed cloud slab.
-function sampleCloudDensity(u, p, covLow, width, scale) {
+// Coverage-thresholded base density (no billow/detail): the shared core of the
+// view march and the cheaper sun-light taps. Two texture fetches.
+function cloudBaseDensity(u, p, noise, scale) {
   // Nubis-style density model:
   //   dimensional_profile = vertical_profile * cloud_coverage
   //   density = saturate(perlin_worley_composite - (1.0 - dimensional_profile))
-  //   fine density = coarse density eroded by high-frequency Worley detail
   const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
   const cloudType = nodeClamp(u.uCloudType, 0.0, 1.0);
 
@@ -373,28 +396,61 @@ function sampleCloudDensity(u, p, covLow, width, scale) {
   const cloudP = p.mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
 
   // Optional broad coverage/influence field, equivalent to a tiny procedural
-  // weather map. Kept internal now that the UI is simplified.
-  const weather = cloudNoise3(cloudP.mul(scale.mul(0.055))).mul(0.5).add(0.5);
-  const coverageMap = mix(1.0, nodeSmoothstep(0.28, 0.72, weather), u.uCloudBanks);
+  // weather map. High enough frequency that several coverage clumps fit inside
+  // the visible dome — at very low frequencies one weather blob spans the
+  // whole sky and the layer reads as uniform cotton.
+  const weather = noise(cloudP.mul(scale.mul(0.15))).x;
+  const coverageMap = mix(1.0, nodeSmoothstep(0.32, 0.66, weather), u.uCloudBanks);
   const dimensionalProfile = verticalProfile.mul(u.uCoverage).mul(coverageMap);
 
-  // Perlin-Worley composite: Perlin-like smooth body plus inverted Worley cells.
+  // Perlin-Worley composite, baked into the R channel.
   const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
-  const perlin = cloudNoise3(shapeP).mul(0.5).add(0.5);
-  const worley = cloudWorley3(shapeP.mul(mix(1.45, 1.9, cloudType)));
-  const composite = nodeSmoothstep(0.18, 0.82, mix(perlin, perlin.mul(worley).add(worley.mul(0.25)), 0.55));
+  const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
 
-  const coarseDensity = nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0);
+  const thresholded = nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0);
+  return { thresholded, cloudP, cloudType, coverageMap };
+}
 
-  // Fine erosion: detail only cuts existing coarse density, controlled by Holes.
+// Light-tap density: 1 texture fetch. Reuses the view sample's coverage map
+// (the weather field is effectively constant over a light-tap distance) but
+// re-evaluates the vertical profile and shape at the tap position — those are
+// what make tops lit and bottoms/far-sides shadowed.
+function cloudLightDensity(u, p, noise, scale, coverageMap) {
+  const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
+  const cloudType = nodeClamp(u.uCloudType, 0.0, 1.0);
+  const bottomGradient = pow(heightFraction, mix(2.0, 1.25, cloudType));
+  const topGradient = pow(oneMinus(heightFraction), mix(1.5, 0.85, cloudType));
+  const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(9.5, 6.5, cloudType)), 0.0, 1.0);
+  const cloudP = p.mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
+  const dimensionalProfile = verticalProfile.mul(u.uCoverage).mul(coverageMap);
+  const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
+  const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
+  return nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0);
+}
+
+// Returns vec2(fineDensity, coarseDensity). `p` is world-space inside the fixed
+// cloud slab. `noise` samples the baked Perlin-Worley 3D texture (R = shape
+// composite, G = Worley detail) — trilinear fetches instead of hundreds of
+// procedural hash evaluations.
+function sampleCloudDensity(u, p, noise, scale) {
+  const { thresholded, cloudP, cloudType, coverageMap } = cloudBaseDensity(u, p, noise, scale);
+
+  // Mid-frequency billow: modulates density *inside* the mass so interiors get
+  // lumpy structure (and, through the density-driven shading, lumpy lighting)
+  // instead of saturating into a flat fill. Zero regions stay zero.
+  const billow = noise(cloudP.mul(scale.mul(mix(0.85, 1.25, cloudType)))).x;
+  const coarseDensity = nodeClamp(thresholded.mul(mix(0.55, 1.45, billow)), 0.0, 1.0);
+
+  // Fine erosion: strongest at the edges, but reaching partway into the
+  // interior so puff cores keep some cauliflower texture.
   const detailP = cloudP.mul(scale.mul(mix(4.2, 6.0, cloudType)));
-  const detail = cloudWorley3(detailP);
-  const edgeMask = oneMinus(nodeSmoothstep(0.22, 0.75, coarseDensity));
+  const detail = noise(detailP).y;
+  const edgeMask = oneMinus(nodeSmoothstep(0.22, 0.75, coarseDensity).mul(0.6));
   const horizonFade = nodeSmoothstep(0.06, 0.24, normalize(p.sub(cameraPosition)).y);
   const erosion = oneMinus(detail).mul(u.uHoles).mul(edgeMask).mul(horizonFade).mul(0.72);
   const fineDensity = nodeClamp(coarseDensity.sub(erosion), 0.0, 1.0);
 
-  return vec2(fineDensity, coarseDensity);
+  return { fine: fineDensity, coarse: coarseDensity, coverageMap };
 }
 
 // Volumetric cloud shader following the standard raymarch model:
@@ -406,7 +462,7 @@ function sampleCloudDensity(u, p, covLow, width, scale) {
 //   - blue-noise-style per-pixel dither on the march start to hide banding at
 //     a low step count
 // Camera-anchored sampling keeps the pattern fixed to the sky.
-const CLOUD_STEPS = 40;
+const CLOUD_STEPS = 28;
 const CLOUD_ABSORPTION = 7.0;
 
 function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, cloudType, cloudBanks, sharpness, wispiness) {
@@ -437,14 +493,16 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     uAltitude: assignUniform(material, 'uAltitude', uniform(80)),
   };
 
+  const noiseTex = getCloudNoiseTexture();
+  // Baked Perlin-Worley sampler: R = shape composite, G = Worley detail.
+  const noise = (coord) => texture3D(noiseTex, coord);
+
   material.fragmentNode = Fn(() => {
     const px = positionWorld;
     const cam = cameraPosition;
     const viewDir = normalize(px.sub(cam));
     const dist = length(px.sub(cam));
 
-    const covLow = mix(0.55, 0.05, nodeClamp(u.uCoverage, 0.0, 1.0));
-    const width = mix(0.50, 0.26, nodeClamp(u.uSharpness, 0.0, 1.0));
     const scale = u.uScale;
     const sunDir = normalize(u.uSunDirection);
 
@@ -477,42 +535,53 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     const jitter = fract(sin(dot(uv(), vec2(12.9898, 78.233))).mul(43758.5453));
     const depth = slabStart.add(stepLen.mul(mix(0.32, 0.68, jitter))).toVar();
 
-    Loop({ start: int(0), end: int(CLOUD_STEPS), type: 'int', name: 'i' }, () => {
-      // World-anchored sample point in the fixed altitude layer: no wind/time
-      // morphing, but camera translation sees the same clouds from new angles.
-      const p = cam.add(viewDir.mul(depth));
-      const densitySample = sampleCloudDensity(u, p, covLow, width, scale);
-      const d = densitySample.x.mul(horizonFade);
-      const coarseD = densitySample.y.mul(horizonFade);
+    // The entire march is skipped below the horizon (half the sky sphere) and
+    // aborts once the view ray is effectively opaque.
+    If(horizonFade.greaterThan(0.001), () => {
+      Loop({ start: int(0), end: int(CLOUD_STEPS), type: 'int', name: 'i' }, () => {
+        If(transmittance.lessThan(0.015), () => { Break(); });
+        // World-anchored sample point in the fixed altitude layer: no wind/time
+        // morphing, but camera translation sees the same clouds from new angles.
+        const p = cam.add(viewDir.mul(depth));
+        const densitySample = sampleCloudDensity(u, p, noise, scale);
+        const d = densitySample.fine.mul(horizonFade);
+        const coarseD = densitySample.coarse.mul(horizonFade);
 
-      // Only accumulate where there's actually cloud.
-      If(d.greaterThan(float(0.005)), () => {
-        // Cheap Nubis-style lighting approximation: height-aware ambient,
-        // density self-shadowing, and forward sun scattering without adding
-        // another expensive density sample.
-        const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
-        const topLight = pow(heightFraction, 0.55);
-        const baseShadow = oneMinus(topLight).mul(0.42);
-        const coreShadow = nodeSmoothstep(0.30, 0.90, coarseD).mul(0.48);
-        const selfShadow = nodeClamp(oneMinus(baseShadow.add(coreShadow)), 0.28, 1.0);
-        const diffuse = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.35, 1.0).mul(selfShadow);
+        // Only accumulate where there's actually cloud.
+        If(d.greaterThan(float(0.005)), () => {
+          // Nubis-style directional lighting: march two density taps toward
+          // the sun so cloud sides facing the light brighten and far sides
+          // fall into shadow — lighting tracks sun elevation *and* azimuth.
+          const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
+          const topLight = pow(heightFraction, 0.55);
+          const baseShadow = oneMinus(topLight).mul(0.42);
+          const coreShadow = nodeSmoothstep(0.30, 0.90, coarseD).mul(0.48);
+          const selfShadow = nodeClamp(oneMinus(baseShadow), 0.4, 1.0);
+          const diffuse = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.35, 1.0).mul(selfShadow);
 
-        // Beer's law style attenuation based on local density.
-        const lightTransmittance = exp(coarseD.negate().mul(1.1));
-        const luminance = float(0.06).add(d.mul(phase));
-        const directLight = mix(u.uShadowColor, u.uSunColor, lightTransmittance.mul(diffuse));
-        const ambientLight = u.uFogColor.mul(mix(0.18, 0.55, topLight)).mul(oneMinus(coarseD.mul(0.22))).mul(oneMinus(coreShadow.mul(0.45)));
-        const stepColor = u.uColor.mul(directLight.mul(luminance).add(ambientLight.mul(0.28)));
+          const lightStep = u.uThickness.mul(0.45);
+          const toSun1 = cloudLightDensity(u, p.add(sunDir.mul(lightStep)), noise, scale, densitySample.coverageMap);
+          const toSun2 = cloudLightDensity(u, p.add(sunDir.mul(lightStep.mul(2.3))), noise, scale, densitySample.coverageMap);
+          const opticalToSun = toSun1.add(toSun2.mul(0.65)).mul(2.4);
+          // Beer-powder: thin backlit edges dip dark before brightening — the
+          // signature crisp rims of the Nubis model.
+          const powder = oneMinus(exp(coarseD.negate().mul(3.5))).mul(0.65).add(0.35);
+          const lightTransmittance = exp(opticalToSun.negate()).mul(powder);
+          const luminance = float(0.06).add(d.mul(phase));
+          const directLight = mix(u.uShadowColor, u.uSunColor, lightTransmittance.mul(diffuse));
+          const ambientLight = u.uFogColor.mul(mix(0.18, 0.55, topLight)).mul(oneMinus(coarseD.mul(0.22))).mul(oneMinus(coreShadow.mul(0.45)));
+          const stepColor = u.uColor.mul(directLight.mul(luminance).add(ambientLight.mul(0.28)));
 
-        // Front-to-back compositing via Beer's law for the view ray.
-        // Normalize optical depth by step count instead of raw world distance;
-        // raw stepLen made the volume read like opaque paint.
-        const tau = d.mul(adaptiveVerticalStep.div(u.uThickness)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
-        lightEnergy.addAssign(transmittance.mul(stepColor).mul(tau).mul(3.5));
-        transmittance.mulAssign(exp(tau.negate()));
+          // Front-to-back compositing via Beer's law for the view ray.
+          // Normalize optical depth by step count instead of raw world distance;
+          // raw stepLen made the volume read like opaque paint.
+          const tau = d.mul(adaptiveVerticalStep.div(u.uThickness)).mul(CLOUD_ABSORPTION).mul(u.uOpacity);
+          lightEnergy.addAssign(transmittance.mul(stepColor).mul(tau).mul(3.5));
+          transmittance.mulAssign(exp(tau.negate()));
+        });
+
+        depth.addAssign(stepLen);
       });
-
-      depth.addAssign(stepLen);
     });
 
     const alpha = nodeClamp(oneMinus(transmittance).mul(u.uOpacity).mul(1.35), 0.0, 1.0);
@@ -981,10 +1050,11 @@ export function syncSunBall(sunBall, camera, direction, distance = sunBall?.user
   }
 
   const radius = sunBall.userData.radius ?? DEFAULT_SUN_BALL_RADIUS;
+  const sizeScale = sunBall.userData.sizeScale ?? 1;
   const horizonScale = 1 + (1 - smoothstep(0.0, 0.35, Math.max(0, sunY))) * 0.18;
   // Atmospheric refraction visibly flattens the disc right at the horizon.
   const squash = 1 - (1 - smoothstep(0.0, 0.14, Math.max(0, sunY))) * 0.22;
-  const s = horizonScale * (radius / DEFAULT_SUN_BALL_RADIUS);
+  const s = horizonScale * (radius / DEFAULT_SUN_BALL_RADIUS) * sizeScale;
   sunBall.scale.set(s, s * squash, s);
   return sunBall;
 }
@@ -1301,8 +1371,10 @@ export class Precipitation {
       const want = this.params.intensity;
       this._startFade(want, 2.4);
     } else {
-      this._profile = null;
-      this._startFade(0, 2.4);
+      // Keep the last profile so particles continue falling and thinning out
+      // during the fade; nulling it froze them mid-air until the timer hid
+      // the whole group at once.
+      this._startFade(0, 1.5);
     }
     return this;
   }
@@ -1572,6 +1644,19 @@ export class MetaverseSky {
     return this.setSun(angles.elevation, angles.azimuth);
   }
 
+  /** Visual sun disc size multiplier (1 = default). Corona scales with it. */
+  setSunSize(scale) {
+    if (this.sunBall) {
+      this.sunBall.userData.sizeScale = Math.max(0.05, Number(scale) || 1);
+      this._syncSunBall();
+    }
+    return this;
+  }
+
+  getSunSize() {
+    return this.sunBall?.userData.sizeScale ?? 1;
+  }
+
   setWindDirection(direction) {
     this.precipitation?.setWindDirection(direction);
     return this;
@@ -1667,6 +1752,7 @@ export class MetaverseSky {
       exposure: this.renderer?.toneMappingExposure,
       envIntensityMin: this.envIntensityMin,
       envIntensityMax: this.envIntensityMax,
+      sunSize: this.getSunSize(),
     };
     if (this.clouds) Object.assign(out, this.clouds.getAtmosphereSettings());
     return out;
@@ -1681,6 +1767,7 @@ export class MetaverseSky {
     if (data.exposure != null && this.renderer) this.renderer.toneMappingExposure = data.exposure;
     if (data.envIntensityMin != null) this.envIntensityMin = data.envIntensityMin;
     if (data.envIntensityMax != null) this.envIntensityMax = data.envIntensityMax;
+    if (data.sunSize != null && this.sunBall) this.sunBall.userData.sizeScale = Math.max(0.05, Number(data.sunSize) || 1);
     if (data.elevation != null) this.elevation = data.elevation;
     if (data.azimuth != null) this.azimuth = data.azimuth;
     if (data.sunPosition != null) {
@@ -1729,6 +1816,7 @@ export class SkyEditor {
     light = null,
     renderer,
     clouds = null,
+    sunBall = null,
     onSunChange = null,
     envIntensityMin = DEFAULT_ENV_INTENSITY_MIN,
     envIntensityMax = DEFAULT_ENV_INTENSITY_MAX,
@@ -1738,6 +1826,7 @@ export class SkyEditor {
     this.light = light;
     this.renderer = renderer;
     this.clouds = clouds;
+    this.sunBall = sunBall;
     this.onSunChange = onSunChange;
     this.envIntensityMin = envIntensityMin;
     this.envIntensityMax = envIntensityMax;
@@ -1768,6 +1857,12 @@ export class SkyEditor {
     this._section('Sun');
     this._slider('Elevation', -20, 90, 0.5, this.elevation, (v) => { this.elevation = v; this._updateSun(); });
     this._slider('Azimuth', -180, 180, 1, this.azimuth, (v) => { this.azimuth = v; this._updateSun(); });
+    if (this.sunBall) {
+      this._slider('Sun size', 0.25, 3, 0.05, this.sunBall.userData.sizeScale ?? 1, (v) => {
+        this.sunBall.userData.sizeScale = v;
+        this.onSunChange?.();
+      });
+    }
 
     this._section('Environment');
     this._slider('IBL min', 0, 2, 0.01, this.envIntensityMin, (v) => {
@@ -1817,7 +1912,7 @@ export class SkyEditor {
     this._slider('Darkness', 0, 1, 0.01, p.darkness, (v) => c.applyAtmosphereSettings({ cloudDarkness: v }));
 
     this._section('Cloud shape');
-    this._slider('Coverage', 0.2, 0.9, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
+    this._slider('Coverage', 0.2, 1.2, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
     this._slider('Cloud Type', 0, 1, 0.01, p.cloudType, (v) => c.applyAtmosphereSettings({ cloudType: v }));
     this._slider('Holes', 0, 1, 0.01, p.holes, (v) => c.applyAtmosphereSettings({ cloudHoles: v }));
 
