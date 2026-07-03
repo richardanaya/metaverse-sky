@@ -480,7 +480,7 @@ function sampleCloudDensity(u, p, noise, scale) {
 //   - blue-noise-style per-pixel dither on the march start to hide banding at
 //     a low step count
 // Camera-anchored sampling keeps the pattern fixed to the sky.
-const CLOUD_STEPS = 28;
+const CLOUD_STEPS = 40;
 const CLOUD_ABSORPTION = 7.0;
 
 function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, cloudType, cloudBanks, sharpness, wispiness) {
@@ -551,7 +551,7 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // Combined with the slab-top break below, near-zenith rays finish in ~23
     // effective steps and horizon rays in ~12.
     const distanceFactor = nodeClamp(slabStart.div(u.uRadius), 0.0, 1.0);
-    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.3, distanceFactor));
+    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.9, distanceFactor));
     const verticalStep = initialVerticalStep.toVar();
     const stepLen = initialVerticalStep.div(up).toVar();
     const transmittance = float(1.0).toVar();
@@ -625,8 +625,8 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
         });
 
         depth.addAssign(stepLen);
-        stepLen.mulAssign(1.022);
-        verticalStep.mulAssign(1.022);
+        stepLen.mulAssign(1.035);
+        verticalStep.mulAssign(1.035);
       });
     });
 
