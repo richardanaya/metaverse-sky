@@ -49,6 +49,7 @@ const CLOUD_DEFAULTS = {
   sharpness: 0.35,
   wispiness: 0.45,
   darkness: 0,
+  cirrus: 0.35,
 };
 
 export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
@@ -69,6 +70,7 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
   sharpness: CLOUD_DEFAULTS.sharpness,
   wispiness: CLOUD_DEFAULTS.wispiness,
   darkness: CLOUD_DEFAULTS.darkness,
+  cirrus: CLOUD_DEFAULTS.cirrus,
 });
 
 function clamp(value, min, max) {
@@ -505,6 +507,7 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     uFogColor: assignUniform(material, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
     uDarkness: assignUniform(material, 'uDarkness', uniform(darkness)),
     uWindOffset: assignUniform(material, 'uWindOffset', uniform(new THREE.Vector3())),
+    uCirrus: assignUniform(material, 'uCirrus', uniform(CLOUD_DEFAULTS.cirrus)),
     uRadius: assignUniform(material, 'uRadius', uniform(420)),
     uThickness: assignUniform(material, 'uThickness', uniform(60)),
     uAltitude: assignUniform(material, 'uAltitude', uniform(80)),
@@ -620,6 +623,27 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
         stepLen.mulAssign(1.035);
         verticalStep.mulAssign(1.035);
       });
+    });
+
+    // Cirrus sub-layer (Nubis 2.5-D model): a thin streaky ice-cloud sheet
+    // far above the volumetric layer. One flat anisotropic lookup, no march;
+    // composited behind the cumulus via the remaining transmittance.
+    const cirrusFade = nodeSmoothstep(0.03, 0.14, viewDir.y).mul(u.uCirrus);
+    If(cirrusFade.greaterThan(0.002), () => {
+      const cirrusAlt = u.uAltitude.mul(2.5).add(160.0);
+      const tCir = cirrusAlt.sub(cam.y).div(up);
+      const pc = cam.add(viewDir.mul(tCir)).sub(u.uWindOffset.mul(1.6));
+      const cuv = pc.xz.mul(scale.mul(0.35));
+      // Strongly anisotropic sampling of the baked noise reads as wind-combed
+      // ice streaks rather than puffs.
+      const s1 = noise(vec3(cuv.x.mul(0.22), 0.37, cuv.y)).x;
+      const s2 = noise(vec3(cuv.x.mul(0.6).add(13.7), 0.71, cuv.y.mul(2.1))).y;
+      const streaks = nodeSmoothstep(0.45, 0.9, s1.mul(0.72).add(s2.mul(0.28)));
+      const cd = streaks.mul(cirrusFade);
+      // Thin ice is translucent and mostly sun-lit, with forward scatter.
+      const cirrusColor = mix(u.uFogColor, u.uSunColor, float(0.45).add(pow(max(mu, 0.0), 3.0).mul(0.4)));
+      lightEnergy.addAssign(transmittance.mul(cirrusColor).mul(cd).mul(0.85));
+      transmittance.mulAssign(oneMinus(cd.mul(0.5)));
     });
 
     const alpha = nodeClamp(oneMinus(transmittance).mul(u.uOpacity).mul(1.35), 0.0, 1.0);
@@ -751,6 +775,7 @@ export class CloudSkyLayer {
       cloudSharpness: p.sharpness,
       cloudWispiness: p.wispiness,
       cloudDarkness: p.darkness,
+      cloudCirrus: p.cirrus,
     };
   }
 
@@ -772,6 +797,7 @@ export class CloudSkyLayer {
     if (data.cloudSharpness != null) p.sharpness = data.cloudSharpness;
     if (data.cloudWispiness != null) p.wispiness = data.cloudWispiness;
     if (data.cloudDarkness != null) p.darkness = data.cloudDarkness;
+    if (data.cloudCirrus != null) p.cirrus = clamp(data.cloudCirrus, 0, 1);
     if (this._material) {
       const u = this._material.uniforms;
       u.uOpacity.value = p.opacity;
@@ -787,6 +813,7 @@ export class CloudSkyLayer {
       u.uAltitude.value = p.altitude;
       u.uThickness.value = Math.max(20, p.drawDistance * 0.18);
       u.uDarkness.value = p.darkness;
+      u.uCirrus.value = p.cirrus;
       u.uColor.value.copy(p.cloudColor);
     }
     if (this._mesh) {
@@ -1977,6 +2004,7 @@ export class SkyEditor {
 
     this._section('Cloud shape');
     this._slider('Coverage', 0.2, 1.2, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
+    this._slider('Cirrus', 0, 1, 0.01, p.cirrus, (v) => c.applyAtmosphereSettings({ cloudCirrus: v }));
     this._slider('Cloud Type', 0, 1, 0.01, p.cloudType, (v) => c.applyAtmosphereSettings({ cloudType: v }));
     this._slider('Holes', 0, 1, 0.01, p.holes, (v) => c.applyAtmosphereSettings({ cloudHoles: v }));
 

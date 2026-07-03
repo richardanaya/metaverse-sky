@@ -37,6 +37,7 @@ export interface CloudSettings {
   sharpness: number;
   wispiness: number;
   darkness: number;
+  cirrus: number;
 }
 
 export const DEFAULT_CLOUD_SETTINGS: Readonly<CloudSettings>;
@@ -70,6 +71,7 @@ export interface AtmosphereSettings {
   cloudSharpness?: number;
   cloudWispiness?: number;
   cloudDarkness?: number;
+  cloudCirrus?: number;
 }
 
 export interface CreateAtmosphereSkyOptions {

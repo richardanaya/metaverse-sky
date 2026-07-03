@@ -39,6 +39,8 @@ const darknessValue = document.querySelector('#darkness-value');
 const coverageInput = document.querySelector('#coverage');
 const coverageValue = document.querySelector('#coverage-value');
 const cloudHolesInput = document.querySelector('#cloud-holes');
+const cloudCirrusInput = document.querySelector('#cloud-cirrus');
+const cloudCirrusValue = document.querySelector('#cloud-cirrus-value');
 const cloudHolesValue = document.querySelector('#cloud-holes-value');
 const cloudTypeInput = document.querySelector('#cloud-type');
 const cloudTypeValue = document.querySelector('#cloud-type-value');
@@ -258,6 +260,11 @@ function bindPanel() {
     return value.toFixed(2);
   });
 
+  bindRange(cloudCirrusInput, cloudCirrusValue, (value) => {
+    sky.applyAtmosphereSettings({ cloudCirrus: value });
+    return value.toFixed(2);
+  });
+
   bindRange(cloudTypeInput, cloudTypeValue, (value) => {
     sky.applyAtmosphereSettings({ cloudType: value });
     return value.toFixed(2);
@@ -362,6 +369,7 @@ function resetDefaults() {
   setRange(darknessInput, d.darkness, darknessValue, (v) => (v < 0.2 ? 'Bright' : v < 0.45 ? 'Cloudy' : v < 0.7 ? 'Overcast' : 'Storm'));
   setRange(coverageInput, d.coverage, coverageValue, (v) => v.toFixed(2));
   setRange(cloudHolesInput, d.holes, cloudHolesValue, (v) => v.toFixed(2));
+  setRange(cloudCirrusInput, d.cirrus, cloudCirrusValue, (v) => v.toFixed(2));
   setRange(cloudTypeInput, d.cloudType, cloudTypeValue, (v) => v.toFixed(2));
   setRange(windDirectionInput, 255, windDirectionValue, (v) => `${v}°`);
   setRange(windSpeedInput, 0.045, windSpeedValue, (v) => v.toFixed(3));
@@ -379,6 +387,7 @@ function resetDefaults() {
     cloudHoles: d.holes,
     cloudType: d.cloudType,
     cloudDarkness: d.darkness,
+    cloudCirrus: d.cirrus,
     cloudColor: d.cloudColor,
     cloudAutoTint: d.autoTint,
   });
