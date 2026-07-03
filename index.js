@@ -9,7 +9,7 @@ import {
   Fn, uniform, texture, texture3D, instancedBufferAttribute,
   vec2, vec3, vec4, float, int,
   abs, max, min, mix, clamp as nodeClamp, smoothstep as nodeSmoothstep, dot, normalize, length, pow, exp, sin, sqrt, fract, oneMinus,
-  If, Loop, Break, Discard, positionLocal, positionWorld, positionView, cameraPosition, uv,
+  If, Loop, Break, Discard, positionLocal, positionWorld, positionView, cameraPosition, uv, screenCoordinate,
 } from 'three/tsl';
 
 export const DEFAULT_SKY_SCALE = 450;
@@ -551,15 +551,17 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // Combined with the slab-top break below, near-zenith rays finish in ~23
     // effective steps and horizon rays in ~12.
     const distanceFactor = nodeClamp(slabStart.div(u.uRadius), 0.0, 1.0);
-    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.9, distanceFactor));
+    const initialVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(0.8, 1.45, distanceFactor));
     const verticalStep = initialVerticalStep.toVar();
     const stepLen = initialVerticalStep.div(up).toVar();
     const transmittance = float(1.0).toVar();
     const lightEnergy = vec3(0.0).toVar();
-    // Stable per-fragment start jitter hides ray-step banding without animated
-    // noise/swimming. Kept subtle so it does not read as screen-door static.
-    const jitter = fract(sin(dot(uv(), vec2(12.9898, 78.233))).mul(43758.5453));
-    const depth = slabStart.add(stepLen.mul(mix(0.32, 0.68, jitter))).toVar();
+    // Per-pixel start jitter hides ray-step banding. It must come from screen
+    // pixel coordinates: the sphere uv varies smoothly across the screen, so
+    // hashing it gives neighboring pixels nearly the same phase and the step
+    // layers alias into coherent wavy bands instead of imperceptible noise.
+    const jitter = fract(sin(dot(screenCoordinate.xy, vec2(12.9898, 78.233))).mul(43758.5453));
+    const depth = slabStart.add(stepLen.mul(mix(0.05, 0.95, jitter))).toVar();
 
     // The entire march is skipped below the horizon (half the sky sphere) and
     // aborts once the view ray is effectively opaque.
@@ -620,8 +622,8 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
         });
 
         depth.addAssign(stepLen);
-        stepLen.mulAssign(1.035);
-        verticalStep.mulAssign(1.035);
+        stepLen.mulAssign(1.028);
+        verticalStep.mulAssign(1.028);
       });
     });
 
