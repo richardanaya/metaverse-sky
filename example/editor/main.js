@@ -36,20 +36,10 @@ const darknessInput = document.querySelector('#darkness');
 const darknessValue = document.querySelector('#darkness-value');
 const coverageInput = document.querySelector('#coverage');
 const coverageValue = document.querySelector('#coverage-value');
-const noiseScaleInput = document.querySelector('#noise-scale');
-const noiseScaleValue = document.querySelector('#noise-scale-value');
-const detailStrengthInput = document.querySelector('#detail-strength');
-const detailStrengthValue = document.querySelector('#detail-strength-value');
 const cloudHolesInput = document.querySelector('#cloud-holes');
 const cloudHolesValue = document.querySelector('#cloud-holes-value');
 const cloudTypeInput = document.querySelector('#cloud-type');
 const cloudTypeValue = document.querySelector('#cloud-type-value');
-const cloudBanksInput = document.querySelector('#cloud-banks');
-const cloudBanksValue = document.querySelector('#cloud-banks-value');
-const sharpnessInput = document.querySelector('#sharpness');
-const sharpnessValue = document.querySelector('#sharpness-value');
-const wispinessInput = document.querySelector('#wispiness');
-const wispinessValue = document.querySelector('#wispiness-value');
 const windDirectionInput = document.querySelector('#wind-direction');
 const windSpeedInput = document.querySelector('#wind-speed');
 const windDirectionValue = document.querySelector('#wind-direction-value');
@@ -261,16 +251,6 @@ function bindPanel() {
     return value.toFixed(2);
   });
 
-  bindRange(noiseScaleInput, noiseScaleValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudNoiseScale: value });
-    return value.toFixed(3);
-  });
-
-  bindRange(detailStrengthInput, detailStrengthValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudDetailStrength: value });
-    return value.toFixed(2);
-  });
-
   bindRange(cloudHolesInput, cloudHolesValue, (value) => {
     sky.applyAtmosphereSettings({ cloudHoles: value });
     return value.toFixed(2);
@@ -278,21 +258,6 @@ function bindPanel() {
 
   bindRange(cloudTypeInput, cloudTypeValue, (value) => {
     sky.applyAtmosphereSettings({ cloudType: value });
-    return value.toFixed(2);
-  });
-
-  bindRange(cloudBanksInput, cloudBanksValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudBanks: value });
-    return value.toFixed(2);
-  });
-
-  bindRange(sharpnessInput, sharpnessValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudSharpness: value });
-    return value.toFixed(2);
-  });
-
-  bindRange(wispinessInput, wispinessValue, (value) => {
-    sky.applyAtmosphereSettings({ cloudWispiness: value });
     return value.toFixed(2);
   });
 
@@ -389,13 +354,8 @@ function resetDefaults() {
   setRange(cloudTileInput, d.tile, cloudTileValue, (v) => `${v}x`);
   setRange(darknessInput, d.darkness, darknessValue, (v) => (v < 0.2 ? 'Bright' : v < 0.45 ? 'Cloudy' : v < 0.7 ? 'Overcast' : 'Storm'));
   setRange(coverageInput, d.coverage, coverageValue, (v) => v.toFixed(2));
-  setRange(noiseScaleInput, d.noiseScale, noiseScaleValue, (v) => v.toFixed(3));
-  setRange(detailStrengthInput, d.detailStrength, detailStrengthValue, (v) => v.toFixed(2));
   setRange(cloudHolesInput, d.holes, cloudHolesValue, (v) => v.toFixed(2));
   setRange(cloudTypeInput, d.cloudType, cloudTypeValue, (v) => v.toFixed(2));
-  setRange(cloudBanksInput, d.cloudBanks, cloudBanksValue, (v) => v.toFixed(2));
-  setRange(sharpnessInput, d.sharpness, sharpnessValue, (v) => v.toFixed(2));
-  setRange(wispinessInput, d.wispiness, wispinessValue, (v) => v.toFixed(2));
   setRange(windDirectionInput, 255, windDirectionValue, (v) => `${v}°`);
   setRange(windSpeedInput, 0.045, windSpeedValue, (v) => v.toFixed(3));
 
@@ -409,13 +369,8 @@ function resetDefaults() {
     cloudDrawDistance: d.drawDistance,
     cloudTile: d.tile,
     cloudCoverage: d.coverage,
-    cloudNoiseScale: d.noiseScale,
-    cloudDetailStrength: d.detailStrength,
     cloudHoles: d.holes,
     cloudType: d.cloudType,
-    cloudBanks: d.cloudBanks,
-    cloudSharpness: d.sharpness,
-    cloudWispiness: d.wispiness,
     cloudDarkness: d.darkness,
     cloudColor: d.cloudColor,
     cloudAutoTint: d.autoTint,

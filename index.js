@@ -21,6 +21,10 @@ export const DEFAULT_EXPOSURE = 0.6;
 export const DEFAULT_SUN_POSITION = [0.45, 0.86, 0.24];
 export const DEFAULT_ENV_INTENSITY_MIN = 1.0;
 export const DEFAULT_ENV_INTENSITY_MAX = 2.0;
+export const DEFAULT_SUN_BALL_DISTANCE = DEFAULT_SKY_SCALE * 0.92;
+export const DEFAULT_SUN_BALL_RADIUS = 12;
+export const DEFAULT_SUN_BALL_COLOR = 0xfff7df;
+export const DEFAULT_SUN_BALL_HORIZON_COLOR = 0xff6a24;
 export const ELEVATION_MIN = -20;
 export const ELEVATION_MAX = 90;
 
@@ -38,7 +42,7 @@ const CLOUD_DEFAULTS = {
   autoTint: true,
   coverage: 0.5,
   noiseScale: 0.012,
-  detailStrength: 0.45,
+  detailStrength: 0,
   holes: 0.5,
   cloudType: 0.55,
   cloudBanks: 0.45,
@@ -352,54 +356,44 @@ const cloudFbm = Fn(([p]) => {
 
 // Returns vec2(fineDensity, coarseDensity). `p` is world-space inside the fixed cloud slab.
 function sampleCloudDensity(u, p, covLow, width, scale) {
-  // Low-frequency field = cloud macro shape; medium field = fluffy body.
-  // Nubis-style simplification: use a vertical density envelope and flatten
-  // the vertical noise axis so the raymarch does not reveal repeated stacked
-  // noise layers.
+  // Nubis-style density model:
+  //   dimensional_profile = vertical_profile * cloud_coverage
+  //   density = saturate(perlin_worley_composite - (1.0 - dimensional_profile))
+  //   fine density = coarse density eroded by high-frequency Worley detail
   const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
-  const type = nodeClamp(u.uCloudType, 0.0, 1.0);
-  // 0=stratus/flatter, 1=cumulus/taller/puffier.
-  const bottomGradient = pow(heightFraction, mix(0.32, 0.82, type));
-  const topGradient = pow(oneMinus(heightFraction), mix(1.35, 0.55, type));
-  const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(2.2, 3.05, type)), 0.0, 1.0);
-  const cloudP = p.mul(vec3(1.0, mix(0.14, 0.42, type), 1.0));
+  const cloudType = nodeClamp(u.uCloudType, 0.0, 1.0);
 
-  // Low-frequency weather/coverage field: organizes clouds into large banks
-  // instead of distributing the same pattern everywhere.
+  // Vertical profile from the Nubis slides, lightly blended by cloud type.
+  const bottomGradient = pow(heightFraction, mix(2.0, 1.25, cloudType));
+  const topGradient = pow(oneMinus(heightFraction), mix(1.5, 0.85, cloudType));
+  const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(9.5, 6.5, cloudType)), 0.0, 1.0);
+
+  // Flattened sampling prevents obvious repeated vertical stacks while keeping
+  // the volume world-locked.
+  const cloudP = p.mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
+
+  // Optional broad coverage/influence field, equivalent to a tiny procedural
+  // weather map. Kept internal now that the UI is simplified.
   const weather = cloudNoise3(cloudP.mul(scale.mul(0.055))).mul(0.5).add(0.5);
-  const bankMask = nodeSmoothstep(0.30, 0.74, weather);
+  const coverageMap = mix(1.0, nodeSmoothstep(0.28, 0.72, weather), u.uCloudBanks);
+  const dimensionalProfile = verticalProfile.mul(u.uCoverage).mul(coverageMap);
 
-  const macro = cloudFbm(cloudP.mul(scale.mul(mix(0.16, 0.28, type)))).mul(0.5).add(0.5);
-  const body = cloudFbm(cloudP.mul(scale.mul(mix(0.72, 1.18, type)))).mul(0.5).add(0.5);
-  // Detail/erosion style depends on type and wispiness: flatter cloud types
-  // stretch detail into sheets; cumulus types lean into cellular Worley billows.
-  const wisp = nodeClamp(u.uWispiness, 0.0, 1.0);
-  const detailStretch = vec3(mix(1.0, 0.48, wisp.mul(oneMinus(type))), 1.0, mix(1.0, 1.85, wisp));
-  const detailP = cloudP.mul(detailStretch).mul(scale.mul(mix(3.4, 6.8, type)));
-  const perlinDetail = cloudNoise3(detailP).mul(0.5).add(0.5);
-  const worleyDetail = cloudWorley3(detailP.mul(mix(1.05, 1.55, type)));
-  const worleyWeight = mix(0.22, 0.72, type).add(wisp.mul(0.16));
-  const detail = mix(perlinDetail, worleyDetail, nodeClamp(worleyWeight, 0.0, 0.88));
-  const shape = nodeSmoothstep(covLow, covLow.add(width), macro);
-  const baseFill = nodeSmoothstep(0.30, 0.70, body);
+  // Perlin-Worley composite: Perlin-like smooth body plus inverted Worley cells.
+  const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
+  const perlin = cloudNoise3(shapeP).mul(0.5).add(0.5);
+  const worley = cloudWorley3(shapeP.mul(mix(1.45, 1.9, cloudType)));
+  const composite = nodeSmoothstep(0.18, 0.82, mix(perlin, perlin.mul(worley).add(worley.mul(0.25)), 0.55));
 
-  // Nubis-inspired edge-aware erosion: preserve dense cloud cores, and let
-  // detail/holes bite harder into thin edge regions and upper cloud portions.
-  const bankedShape = shape.mul(mix(1.0, bankMask, u.uCloudBanks));
-  const baseDensity = bankedShape.mul(baseFill);
-  const edgeMask = oneMinus(nodeSmoothstep(0.25, 0.78, baseDensity));
-  const topDetailMask = mix(mix(0.34, 0.52, type), mix(0.92, 1.58, type), heightFraction);
-  const typeErosion = mix(0.62, 1.24, type).add(wisp.mul(0.18));
-  const edgeDetailAmount = mix(0.0, 0.58, u.uDetailStrength).mul(typeErosion).mul(edgeMask).mul(topDetailMask);
-  const innerDetailAmount = mix(0.0, 0.16, u.uDetailStrength).mul(mix(0.45, 1.0, type)).mul(oneMinus(edgeMask)).mul(topDetailMask);
-  const holeAmount = mix(0.03, 0.78, u.uHoles).mul(typeErosion).mul(edgeMask).mul(topDetailMask);
+  const coarseDensity = nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0);
 
-  const fill = baseFill
-    .add(detail.sub(0.5).mul(edgeDetailAmount.add(innerDetailAmount)))
-    .sub(oneMinus(detail).mul(holeAmount));
+  // Fine erosion: detail only cuts existing coarse density, controlled by Holes.
+  const detailP = cloudP.mul(scale.mul(mix(4.2, 6.0, cloudType)));
+  const detail = cloudWorley3(detailP);
+  const edgeMask = oneMinus(nodeSmoothstep(0.22, 0.75, coarseDensity));
+  const horizonFade = nodeSmoothstep(0.06, 0.24, normalize(p.sub(cameraPosition)).y);
+  const erosion = oneMinus(detail).mul(u.uHoles).mul(edgeMask).mul(horizonFade).mul(0.72);
+  const fineDensity = nodeClamp(coarseDensity.sub(erosion), 0.0, 1.0);
 
-  const coarseDensity = nodeClamp(baseDensity, 0.0, 1.0).mul(verticalProfile);
-  const fineDensity = nodeClamp(bankedShape.mul(fill).add(mix(0.055, 0.02, u.uCloudBanks)), 0.0, 1.0).mul(verticalProfile);
   return vec2(fineDensity, coarseDensity);
 }
 
@@ -412,7 +406,7 @@ function sampleCloudDensity(u, p, covLow, width, scale) {
 //   - blue-noise-style per-pixel dither on the march start to hide banding at
 //     a low step count
 // Camera-anchored sampling keeps the pattern fixed to the sky.
-const CLOUD_STEPS = 24;
+const CLOUD_STEPS = 40;
 const CLOUD_ABSORPTION = 7.0;
 
 function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, cloudType, cloudBanks, sharpness, wispiness) {
@@ -474,11 +468,14 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // Nubis-style adaptive march: keep small steps nearby, grow the step size
     // with distance so far/horizon clouds are cheaper and less visibly layered.
     const distanceFactor = nodeClamp(slabStart.div(u.uRadius), 0.0, 1.0);
-    const adaptiveVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(1.0, 2.0, distanceFactor));
+    const adaptiveVerticalStep = u.uThickness.div(float(CLOUD_STEPS)).mul(mix(1.0, 1.18, distanceFactor));
     const stepLen = adaptiveVerticalStep.div(up);
     const transmittance = float(1.0).toVar();
     const lightEnergy = vec3(0.0).toVar();
-    const depth = slabStart.add(stepLen.mul(0.5)).toVar();
+    // Stable per-fragment start jitter hides ray-step banding without animated
+    // noise/swimming. Kept subtle so it does not read as screen-door static.
+    const jitter = fract(sin(dot(uv(), vec2(12.9898, 78.233))).mul(43758.5453));
+    const depth = slabStart.add(stepLen.mul(mix(0.32, 0.68, jitter))).toVar();
 
     Loop({ start: int(0), end: int(CLOUD_STEPS), type: 'int', name: 'i' }, () => {
       // World-anchored sample point in the fixed altitude layer: no wind/time
@@ -779,11 +776,17 @@ export function createAtmosphereSky({
     const segmentLength = tMax.div(viewSamples);
     const betaRayleigh = vec3(5.802, 13.558, 33.100).mul(0.001).mul(u.rayleigh);
     const betaMie = vec3(3.996).mul(0.001).mul(u.mieCoefficient.mul(180.0)).mul(nodeClamp(u.turbidity.div(8.0), 0.25, 2.5));
+    // Ozone absorption (Chappuis band, peaks in green): deepens the zenith blue
+    // and pushes twilight toward saturated orange/red. Pure absorption term.
+    const betaOzone = vec3(0.650, 1.881, 0.085).mul(0.0013);
     const scaleRayleigh = float(8.0);
     const scaleMie = float(1.2);
+    // Tent-shaped ozone layer centered at 25km, ~15km half-width.
+    const ozoneDensity = (h) => max(oneMinus(abs(h.sub(25.0)).div(15.0)), 0.0);
 
     const opticalDepthR = float(0.0).toVar();
     const opticalDepthM = float(0.0).toVar();
+    const opticalDepthO = float(0.0).toVar();
     const sumR = vec3(0.0).toVar();
     const sumM = vec3(0.0).toVar();
     const t = float(0.0).toVar();
@@ -796,6 +799,7 @@ export function createAtmosphereSky({
       const densityM = exp(height.div(scaleMie).negate());
       opticalDepthR.addAssign(densityR.mul(segmentLength));
       opticalDepthM.addAssign(densityM.mul(segmentLength));
+      opticalDepthO.addAssign(ozoneDensity(height).mul(segmentLength));
 
       const bLight = dot(p, sunDir);
       const cLight = dot(p, p).sub(atmosphereRadius.mul(atmosphereRadius));
@@ -803,16 +807,20 @@ export function createAtmosphereSky({
       const lightLength = bLight.negate().add(sqrt(hLight)).div(lightSamples);
       const lightDepthR = float(0.0).toVar();
       const lightDepthM = float(0.0).toVar();
+      const lightDepthO = float(0.0).toVar();
       const lt = float(0.0).toVar();
       Loop({ start: int(0), end: int(4), type: 'int', name: 'j' }, () => {
         const lp = p.add(sunDir.mul(lt.add(lightLength.mul(0.5))));
         const lh = max(length(lp).sub(planetRadius), 0.0);
         lightDepthR.addAssign(exp(lh.div(scaleRayleigh).negate()).mul(lightLength));
         lightDepthM.addAssign(exp(lh.div(scaleMie).negate()).mul(lightLength));
+        lightDepthO.addAssign(ozoneDensity(lh).mul(lightLength));
         lt.addAssign(lightLength);
       });
 
-      const tau = betaRayleigh.mul(opticalDepthR.add(lightDepthR)).add(betaMie.mul(opticalDepthM.add(lightDepthM)));
+      const tau = betaRayleigh.mul(opticalDepthR.add(lightDepthR))
+        .add(betaMie.mul(opticalDepthM.add(lightDepthM)))
+        .add(betaOzone.mul(opticalDepthO.add(lightDepthO)));
       const attenuation = exp(tau.negate());
       sumR.addAssign(attenuation.mul(densityR).mul(segmentLength));
       sumM.addAssign(attenuation.mul(densityM).mul(segmentLength));
@@ -843,8 +851,8 @@ export function createAtmosphereSky({
 
     // Sunset warm extinction and a compact solar disc/glow.
     const sunDot = max(mu, 0.0);
-    const sunDisc = pow(sunDot, 3500.0).mul(day).mul(3.0);
-    const sunGlow = pow(sunDot, mix(20.0, 6.0, nodeClamp(u.turbidity.div(12.0), 0.0, 1.0))).mul(nodeSmoothstep(-0.08, 0.35, sunY)).mul(0.18);
+    const sunDisc = pow(sunDot, 14000.0).mul(day).mul(6.0);
+    const sunGlow = pow(sunDot, mix(80.0, 24.0, nodeClamp(u.turbidity.div(12.0), 0.0, 1.0))).mul(nodeSmoothstep(-0.08, 0.35, sunY)).mul(0.08);
     const warm = mix(vec3(1.0, 0.38, 0.16), vec3(1.0, 0.92, 0.72), day);
     scatter = scatter.add(warm.mul(sunDisc.add(sunGlow)));
 
@@ -854,6 +862,11 @@ export function createAtmosphereSky({
     const night = mix(vec3(0.008, 0.014, 0.035), vec3(0.025, 0.040, 0.090), pow(horizon, 0.7));
     let col = mix(night, scatter, nodeSmoothstep(-0.18, 0.02, sunY));
     col = oneMinus(exp(col.mul(-1.15)));
+
+    // Tiny stable dither breaks up gradient banding in the smooth sky.
+    const dither = fract(sin(dot(viewDir.xy.add(viewDir.z), vec2(12.9898, 78.233))).mul(43758.5453));
+    col = col.add(vec3(dither.sub(0.5).mul(1.0 / 160.0)));
+
     col = nodeClamp(col, vec3(0.0), vec3(8.0));
     return vec4(col, 1.0);
   })();
@@ -869,6 +882,111 @@ export function setSkySun(sky, { elevation, azimuth, light = null, lightDistance
   sky.material.uniforms.sunPosition.value.copy(direction);
   if (light) light.position.copy(direction).multiplyScalar(lightDistance);
   return direction;
+}
+
+// The sun quad extends this many disc radii past the disc so the corona has
+// room to fall off without a visible clipping square.
+const SUN_GLOW_EXTENT = 5;
+
+export function createSunBall({
+  distance = DEFAULT_SUN_BALL_DISTANCE,
+  radius = DEFAULT_SUN_BALL_RADIUS,
+  color = DEFAULT_SUN_BALL_COLOR,
+  horizonColor = DEFAULT_SUN_BALL_HORIZON_COLOR,
+  segments = 32, // kept for API compatibility; the disc is now shader-drawn
+} = {}) {
+  // Camera-facing quad with a shaded solar disc: limb-darkened HDR core, soft
+  // rim, and a two-lobe additive corona (tight aureole + broad halo). Reads as
+  // a glowing star instead of a flat matte ball.
+  const size = radius * 2 * SUN_GLOW_EXTENT;
+  const geometry = new THREE.PlaneGeometry(size, size);
+  const material = new THREE.MeshBasicNodeMaterial();
+  material.transparent = true;
+  material.blending = THREE.AdditiveBlending;
+  material.toneMapped = false;
+  material.fog = false;
+  material.depthWrite = false;
+  // Keep depth testing on so terrain/objects can occlude the sun ball.
+  material.depthTest = true;
+
+  const u = {
+    uColor: assignUniform(material, 'uColor', uniform(new THREE.Color(color))),
+    uGlowColor: assignUniform(material, 'uGlowColor', uniform(new THREE.Color(color))),
+    uOpacity: assignUniform(material, 'uOpacity', uniform(1)),
+    uGlow: assignUniform(material, 'uGlow', uniform(1)),
+  };
+
+  material.fragmentNode = Fn(() => {
+    const q = uv().sub(0.5).mul(2.0); // [-1, 1] across the quad
+    const r = length(q);
+    // Radial distance in disc radii: 1.0 is the limb, SUN_GLOW_EXTENT the quad edge.
+    const rr = r.mul(SUN_GLOW_EXTENT);
+
+    // Solar limb darkening: hot white center falling to the tinted rim.
+    const rd = nodeClamp(rr, 0.0, 1.0);
+    const limb = sqrt(max(oneMinus(rd.mul(rd)), 0.0));
+    const discShape = oneMinus(nodeSmoothstep(0.94, 1.03, rr));
+    const discColor = mix(u.uColor, vec3(1.0), limb.mul(0.55));
+    const disc = discColor.mul(float(0.6).add(limb.mul(0.4))).mul(discShape).mul(2.4);
+
+    // Corona: tight aureole hugging the limb plus a broad soft halo, faded out
+    // well before the quad edge so the billboard never shows a hard border.
+    const aureole = exp(max(rr.sub(1.0), 0.0).mul(-1.7));
+    const halo = pow(max(oneMinus(r), 0.0), 2.6).mul(0.55);
+    const edgeFade = oneMinus(nodeSmoothstep(0.78, 1.0, r));
+    const glow = u.uGlowColor.mul(aureole.mul(0.6).add(halo)).mul(u.uGlow).mul(edgeFade);
+
+    const col = disc.add(glow.mul(oneMinus(discShape.mul(0.85))));
+    return vec4(col.mul(u.uOpacity), 1.0);
+  })();
+
+  const sunBall = new THREE.Mesh(geometry, material);
+  sunBall.name = 'metaverse-sky-sun-ball';
+  // Draw after the sky dome; otherwise the sky shader overpaints the mesh.
+  sunBall.renderOrder = 998;
+  sunBall.userData.distance = distance;
+  sunBall.userData.radius = radius;
+  sunBall.userData.highColor = new THREE.Color(color);
+  sunBall.userData.horizonColor = new THREE.Color(horizonColor);
+  return sunBall;
+}
+
+export function syncSunBall(sunBall, camera, direction, distance = sunBall?.userData?.distance ?? DEFAULT_SUN_BALL_DISTANCE) {
+  if (!sunBall || !camera) return null;
+  const d = vectorFrom(direction).normalize();
+  const sunY = d.y;
+  sunBall.position.copy(camera.position).add(d.multiplyScalar(distance));
+  sunBall.visible = sunY > -0.08;
+  // Billboard the glow quad at the camera.
+  sunBall.quaternion.copy(camera.quaternion);
+
+  const material = sunBall.material;
+  const day = smoothstep(-0.08, 0.12, sunY);
+  const horizonWarmth = 1 - smoothstep(0.02, 0.55, Math.max(0, sunY));
+  const highColor = sunBall.userData.highColor ?? new THREE.Color(DEFAULT_SUN_BALL_COLOR);
+  const horizonColor = sunBall.userData.horizonColor ?? new THREE.Color(DEFAULT_SUN_BALL_HORIZON_COLOR);
+  const opacity = clamp(day * (0.45 + 0.55 * smoothstep(-0.02, 0.22, sunY)), 0, 1);
+  if (material?.uniforms?.uColor) {
+    const un = material.uniforms;
+    un.uColor.value.copy(highColor).lerp(horizonColor, horizonWarmth * 0.95);
+    un.uGlowColor.value.copy(highColor).lerp(horizonColor, Math.min(1, horizonWarmth * 1.2));
+    un.uOpacity.value = opacity;
+    // The corona swells and warms as the sun approaches the horizon.
+    un.uGlow.value = 0.85 + horizonWarmth * 0.75;
+  } else if (material) {
+    // Custom/legacy meshes with a plain color material.
+    material.color.copy(highColor).lerp(horizonColor, horizonWarmth * 0.95);
+    material.opacity = opacity;
+    material.needsUpdate = true;
+  }
+
+  const radius = sunBall.userData.radius ?? DEFAULT_SUN_BALL_RADIUS;
+  const horizonScale = 1 + (1 - smoothstep(0.0, 0.35, Math.max(0, sunY))) * 0.18;
+  // Atmospheric refraction visibly flattens the disc right at the horizon.
+  const squash = 1 - (1 - smoothstep(0.0, 0.14, Math.max(0, sunY))) * 0.22;
+  const s = horizonScale * (radius / DEFAULT_SUN_BALL_RADIUS);
+  sunBall.scale.set(s, s * squash, s);
+  return sunBall;
 }
 
 export function syncEnvironmentIntensity({
@@ -1285,6 +1403,8 @@ export class MetaverseSky {
     cloudOptions = {},
     precipitation = false,
     precipitationOptions = {},
+    sunBall = true,
+    sunBallOptions = {},
     skyScale = DEFAULT_SKY_SCALE,
     atmosphere = {},
     envIntensityMin = DEFAULT_ENV_INTENSITY_MIN,
@@ -1306,6 +1426,10 @@ export class MetaverseSky {
     this.onSunChange = onSunChange;
     this.sky = sky ?? createAtmosphereSky({ scale: skyScale, ...atmosphere });
     this.scene.add(this.sky);
+    this.sunBall = sunBall
+      ? (sunBall?.isObject3D ? sunBall : createSunBall({ distance: skyScale * 0.92, ...sunBallOptions }))
+      : null;
+    if (this.sunBall) this.scene.add(this.sunBall);
 
     if (renderer && atmosphere.exposure != null) renderer.toneMappingExposure = atmosphere.exposure;
 
@@ -1313,6 +1437,7 @@ export class MetaverseSky {
     this.elevation = atmosphere.elevation ?? angles.elevation;
     this.azimuth = atmosphere.azimuth ?? angles.azimuth;
     setSkySun(this.sky, { elevation: this.elevation, azimuth: this.azimuth, light: this.light, lightDistance: this.lightDistance });
+    this._syncSunBall();
 
     this.clouds = clouds
       ? new CloudSkyLayer({ scene, camera, sky: this.sky, ...cloudOptions }).init()
@@ -1326,6 +1451,10 @@ export class MetaverseSky {
     this.syncEnvironmentLighting();
   }
 
+  _syncSunBall() {
+    return syncSunBall(this.sunBall, this.camera, this.sky.material.uniforms.sunPosition.value);
+  }
+
   setSun(elevation = this.elevation, azimuth = this.azimuth) {
     this.elevation = elevation;
     this.azimuth = azimuth;
@@ -1335,6 +1464,7 @@ export class MetaverseSky {
       light: this.light,
       lightDistance: this.lightDistance,
     });
+    this._syncSunBall();
     this.syncEnvironmentLighting();
     this.onSunChange?.(direction);
     return this;
@@ -1469,6 +1599,7 @@ export class MetaverseSky {
       light: this.light,
       lightDistance: this.lightDistance,
     });
+    this._syncSunBall();
     this.clouds?.applyAtmosphereSettings(data);
     this.syncEnvironmentLighting();
     return this;
@@ -1476,6 +1607,7 @@ export class MetaverseSky {
 
   update(deltaTime) {
     this.sky.position.copy(this.camera.position);
+    this._syncSunBall();
     this.clouds?.update(deltaTime);
     this.precipitation?.update(deltaTime);
     return this;
@@ -1484,6 +1616,11 @@ export class MetaverseSky {
   dispose() {
     this.clouds?.dispose();
     this.precipitation?.dispose();
+    if (this.sunBall) {
+      this.scene.remove(this.sunBall);
+      this.sunBall.geometry?.dispose?.();
+      this.sunBall.material?.dispose?.();
+    }
     this.scene.remove(this.sky);
     this.sky.geometry?.dispose?.();
     this.sky.material?.dispose?.();
@@ -1583,15 +1720,10 @@ export class SkyEditor {
     this._slider('Tiling', 3, 10, 0.5, p.tile, (v) => c.applyAtmosphereSettings({ cloudTile: v }));
     this._slider('Darkness', 0, 1, 0.01, p.darkness, (v) => c.applyAtmosphereSettings({ cloudDarkness: v }));
 
-    this._section('Cloud noise');
+    this._section('Cloud shape');
     this._slider('Coverage', 0.2, 0.9, 0.01, p.coverage, (v) => c.applyAtmosphereSettings({ cloudCoverage: v }));
-    this._slider('Pattern scale', 0.002, 0.04, 0.001, p.noiseScale, (v) => c.applyAtmosphereSettings({ cloudNoiseScale: v }));
-    this._slider('Detail', 0, 2, 0.01, p.detailStrength, (v) => c.applyAtmosphereSettings({ cloudDetailStrength: v }));
-    this._slider('Holes', 0, 1, 0.01, p.holes, (v) => c.applyAtmosphereSettings({ cloudHoles: v }));
     this._slider('Cloud Type', 0, 1, 0.01, p.cloudType, (v) => c.applyAtmosphereSettings({ cloudType: v }));
-    this._slider('Cloud Banks', 0, 1, 0.01, p.cloudBanks, (v) => c.applyAtmosphereSettings({ cloudBanks: v }));
-    this._slider('Sharpness', 0, 1, 0.01, p.sharpness, (v) => c.applyAtmosphereSettings({ cloudSharpness: v }));
-    this._slider('Wispiness', 0, 1, 0.01, p.wispiness, (v) => c.applyAtmosphereSettings({ cloudWispiness: v }));
+    this._slider('Holes', 0, 1, 0.01, p.holes, (v) => c.applyAtmosphereSettings({ cloudHoles: v }));
 
     this._section('Cloud color');
     this._checkbox('Tint from sun', p.autoTint, (on) => c.applyAtmosphereSettings({ cloudAutoTint: on }));

@@ -32,7 +32,16 @@ const ground = new THREE.Mesh(
 ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
 
-const atmosphere = new MetaverseSky({ scene, camera, renderer, light: sun, clouds: true });
+const atmosphere = new MetaverseSky({
+  scene,
+  camera,
+  renderer,
+  light: sun,
+  clouds: true,
+  // Put the sun in the initial camera view for the minimal demo.
+  atmosphere: { elevation: 35, azimuth: -150 },
+  sunBallOptions: { radius: 18 },
+});
 
 function resize() {
   const width = canvas.clientWidth;

@@ -10,6 +10,10 @@ export const DEFAULT_EXPOSURE: number;
 export const DEFAULT_SUN_POSITION: [number, number, number];
 export const DEFAULT_ENV_INTENSITY_MIN: number;
 export const DEFAULT_ENV_INTENSITY_MAX: number;
+export const DEFAULT_SUN_BALL_DISTANCE: number;
+export const DEFAULT_SUN_BALL_RADIUS: number;
+export const DEFAULT_SUN_BALL_COLOR: number;
+export const DEFAULT_SUN_BALL_HORIZON_COLOR: number;
 export const ELEVATION_MIN: number;
 export const ELEVATION_MAX: number;
 
@@ -84,6 +88,19 @@ export interface SunAngles {
 export function sunDirectionFromAngles(elevation: number, azimuth: number): THREE.Vector3;
 export function getSunAnglesFromDirection(direction: THREE.Vector3 | [number, number, number]): SunAngles;
 export function createAtmosphereSky(options?: CreateAtmosphereSkyOptions): Sky;
+export function createSunBall(options?: {
+  distance?: number;
+  radius?: number;
+  color?: THREE.ColorRepresentation;
+  horizonColor?: THREE.ColorRepresentation;
+  segments?: number;
+}): THREE.Mesh;
+export function syncSunBall(
+  sunBall: THREE.Object3D | null | undefined,
+  camera: THREE.Camera,
+  direction: THREE.Vector3 | [number, number, number],
+  distance?: number,
+): THREE.Object3D | null;
 export function setSkySun(
   sky: Sky,
   options?: { elevation?: number; azimuth?: number; light?: THREE.Light | null; lightDistance?: number },
@@ -163,6 +180,14 @@ export interface MetaverseSkyOptions {
   cloudOptions?: Partial<CloudSettings>;
   precipitation?: boolean;
   precipitationOptions?: Partial<PrecipSettings> & { type?: PrecipType; textures?: Partial<Record<PrecipType, string>> };
+  sunBall?: boolean | THREE.Object3D;
+  sunBallOptions?: {
+    distance?: number;
+    radius?: number;
+    color?: THREE.ColorRepresentation;
+    horizonColor?: THREE.ColorRepresentation;
+    segments?: number;
+  };
   skyScale?: number;
   atmosphere?: CreateAtmosphereSkyOptions & AtmosphereSettings;
   envIntensityMin?: number;
@@ -177,6 +202,7 @@ export class MetaverseSky {
   renderer: THREE.WebGLRenderer | null;
   light: THREE.Light | null;
   sky: Sky;
+  sunBall: THREE.Object3D | null;
   clouds: CloudSkyLayer | null;
   precipitation: Precipitation | null;
   elevation: number;
