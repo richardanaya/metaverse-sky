@@ -526,13 +526,16 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     // around/under the scene like a full enclosing sphere.
     const horizonFade = nodeSmoothstep(float(0.0), float(0.16), viewDir.y);
 
-    // Henyey-Greenstein phase: brightens light looking toward the sun.
+    // Dual-lobe Henyey-Greenstein (Nubis): a strong forward lobe for direct
+    // scattering plus a wide soft lobe applied to the multiple-scattering
+    // term, so dense sunlit regions glow instead of flattening to grey.
     const mu = dot(viewDir, sunDir);
-    const g = float(0.5);
-    const gg = g.mul(g);
-    const phase = float(0.25).mul(float(1.0).sub(gg)).div(
-      pow(float(1.0).add(gg).sub(g.mul(mu).mul(2.0)), float(1.5)),
-    ).add(float(0.25));
+    const hg = (g) => {
+      const g2 = g * g;
+      return float(1.0 - g2).div(pow(float(1.0 + g2).sub(mu.mul(2.0 * g)), 1.5));
+    };
+    const phasePrimary = hg(0.55).mul(0.28).add(0.12);
+    const phaseSecondary = hg(0.15).mul(0.45).add(0.20);
 
     // Fixed world-altitude cloud slab. This keeps the noise locked in the sky
     // instead of making the camera fly through arbitrary sphere noise.
@@ -578,12 +581,20 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
           const toSun1 = cloudLightDensity(u, p.add(sunDir.mul(lightStep)), noise, scale, densitySample.coverageMap);
           const toSun2 = cloudLightDensity(u, p.add(sunDir.mul(lightStep.mul(2.3))), noise, scale, densitySample.coverageMap);
           const opticalToSun = toSun1.add(toSun2.mul(0.65)).mul(2.4);
+          const directT = exp(opticalToSun.negate());
           // Beer-powder: thin backlit edges dip dark before brightening — the
           // signature crisp rims of the Nubis model.
           const powder = oneMinus(exp(coarseD.negate().mul(3.5))).mul(0.65).add(0.35);
-          const lightTransmittance = exp(opticalToSun.negate()).mul(powder);
-          const luminance = float(0.06).add(d.mul(phase));
-          const directLight = mix(u.uShadowColor, u.uSunColor, lightTransmittance.mul(diffuse));
+          const lightTransmittance = directT.mul(powder);
+          // Nubis multiple-scattering approximation: light that bounces deeper
+          // into dense, high, sun-attenuated regions re-emerges as a soft glow
+          // (ms_volume from the Nubis Evolved slides).
+          const msVolume = nodeClamp(densitySample.dimensionalProfile.mul(adaptiveVerticalStep).sub(0.1).div(0.9), 0.0, 1.0)
+            .mul(pow(nodeClamp(u.uCoverage.mul(max(u.uCloudType, 0.05)), 0.0, 1.0), 0.25))
+            .mul(pow(directT, 0.6))
+            .mul(pow(heightFraction, 0.7));
+          const luminance = float(0.06).add(d.mul(phasePrimary.add(phaseSecondary.mul(msVolume))));
+          const directLight = mix(u.uShadowColor, u.uSunColor, nodeClamp(lightTransmittance.mul(diffuse).add(msVolume.mul(0.7)), 0.0, 1.0));
           const ambientLight = u.uFogColor.mul(mix(0.18, 0.55, topLight)).mul(oneMinus(coarseD.mul(0.22))).mul(oneMinus(coreShadow.mul(0.45)));
           const stepColor = u.uColor.mul(directLight.mul(luminance).add(ambientLight.mul(0.28)));
 
