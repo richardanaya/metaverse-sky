@@ -391,9 +391,10 @@ function cloudBaseDensity(u, p, noise, scale) {
   const topGradient = pow(oneMinus(heightFraction), mix(1.5, 0.85, cloudType));
   const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(9.5, 6.5, cloudType)), 0.0, 1.0);
 
-  // Flattened sampling prevents obvious repeated vertical stacks while keeping
-  // the volume world-locked.
-  const cloudP = p.mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
+  // Flattened sampling prevents obvious repeated vertical stacks. The wind
+  // offset scrolls the noise field so the cloudscape drifts (Nubis: deform
+  // the sample coordinates by wind * time).
+  const cloudP = p.sub(u.uWindOffset).mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
 
   // Optional broad coverage/influence field, equivalent to a tiny procedural
   // weather map. High enough frequency that several coverage clumps fit inside
@@ -425,7 +426,7 @@ function cloudLightDensity(u, p, noise, scale, coverageMap) {
   const bottomGradient = pow(heightFraction, mix(2.0, 1.25, cloudType));
   const topGradient = pow(oneMinus(heightFraction), mix(1.5, 0.85, cloudType));
   const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(9.5, 6.5, cloudType)), 0.0, 1.0);
-  const cloudP = p.mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
+  const cloudP = p.sub(u.uWindOffset).mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
   const dimensionalProfile = verticalProfile.mul(u.uCoverage).mul(coverageMap);
   const density = float(0.0).toVar();
   If(dimensionalProfile.greaterThan(0.02), () => {
@@ -503,6 +504,7 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
     uShadowColor: assignUniform(material, 'uShadowColor', uniform(new THREE.Color(0xc9d6e8))),
     uFogColor: assignUniform(material, 'uFogColor', uniform(new THREE.Color(0x9fb7d5))),
     uDarkness: assignUniform(material, 'uDarkness', uniform(darkness)),
+    uWindOffset: assignUniform(material, 'uWindOffset', uniform(new THREE.Vector3())),
     uRadius: assignUniform(material, 'uRadius', uniform(420)),
     uThickness: assignUniform(material, 'uThickness', uniform(60)),
     uAltitude: assignUniform(material, 'uAltitude', uniform(80)),
@@ -642,7 +644,26 @@ export class CloudSkyLayer {
     this._autoTintColor = new THREE.Color();
     this._sunColor = new THREE.Color(0xfff0d2);
     this._shadowColor = new THREE.Color(0xc9d6e8);
+    // Gentle default drift so the sky is alive without any wind configured;
+    // setWindDirection/setWindSpeed (same units as Precipitation) override.
+    this._windX = 0.98;
+    this._windZ = 0.2;
+    this._windSpeed = 0.02;
+    this._windOffset = new THREE.Vector3();
     this._ready = false;
+  }
+
+  setWindDirection(direction) {
+    const vec = Array.isArray(direction) ? direction : [Number(direction?.x) || 0, Number(direction?.y) || 0];
+    const len = Math.hypot(vec[0], vec[1]) || 1;
+    this._windX = vec[0] / len;
+    this._windZ = vec[1] / len;
+    return this;
+  }
+
+  setWindSpeed(speed) {
+    this._windSpeed = Math.max(0, speed);
+    return this;
   }
 
   init() {
@@ -778,6 +799,11 @@ export class CloudSkyLayer {
     const p = this.params;
     this._mesh.position.copy(this.camera.position);
     const u = this._material.uniforms;
+    // Clouds ride the wind at half the precipitation drift rate.
+    const windMag = this._windSpeed * 30 * 0.5;
+    this._windOffset.x += this._windX * windMag * (dt || 0);
+    this._windOffset.z += this._windZ * windMag * (dt || 0);
+    u.uWindOffset.value.copy(this._windOffset);
     this._syncFog();
     this._syncSunLighting();
 
@@ -1689,11 +1715,13 @@ export class MetaverseSky {
 
   setWindDirection(direction) {
     this.precipitation?.setWindDirection(direction);
+    this.clouds?.setWindDirection(direction);
     return this;
   }
 
   setWindSpeed(speed) {
     this.precipitation?.setWindSpeed(speed);
+    this.clouds?.setWindSpeed(speed);
     return this;
   }
 
