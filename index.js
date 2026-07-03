@@ -573,7 +573,6 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
           const heightFraction = nodeClamp(p.y.sub(u.uAltitude).div(u.uThickness), 0.0, 1.0);
           const topLight = pow(heightFraction, 0.55);
           const baseShadow = oneMinus(topLight).mul(0.42);
-          const coreShadow = nodeSmoothstep(0.30, 0.90, coarseD).mul(0.48);
           const selfShadow = nodeClamp(oneMinus(baseShadow), 0.4, 1.0);
           const diffuse = nodeClamp(sunDir.y.mul(0.5).add(0.5), 0.35, 1.0).mul(selfShadow);
 
@@ -595,7 +594,12 @@ function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detail
             .mul(pow(heightFraction, 0.7));
           const luminance = float(0.06).add(d.mul(phasePrimary.add(phaseSecondary.mul(msVolume))));
           const directLight = mix(u.uShadowColor, u.uSunColor, nodeClamp(lightTransmittance.mul(diffuse).add(msVolume.mul(0.7)), 0.0, 1.0));
-          const ambientLight = u.uFogColor.mul(mix(0.18, 0.55, topLight)).mul(oneMinus(coarseD.mul(0.22))).mul(oneMinus(coreShadow.mul(0.45)));
+          // Nubis ambient scattering: sky light reaches the cloud in proportion
+          // to sqrt(1 - dimensional_profile) — bright translucent edges/tops,
+          // naturally darker dense bases — weighted toward the layer top.
+          const ambientScattering = pow(oneMinus(nodeClamp(densitySample.dimensionalProfile, 0.0, 1.0)), 0.5)
+            .mul(mix(0.35, 1.0, topLight));
+          const ambientLight = u.uFogColor.mul(ambientScattering).mul(0.55);
           const stepColor = u.uColor.mul(directLight.mul(luminance).add(ambientLight.mul(0.28)));
 
           // Front-to-back compositing via Beer's law for the view ray.
