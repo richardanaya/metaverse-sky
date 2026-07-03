@@ -412,7 +412,10 @@ function cloudBaseDensity(u, p, noise, scale) {
   If(dimensionalProfile.greaterThan(0.02), () => {
     // Perlin-Worley composite, baked into the R channel.
     const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
-    const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
+    // Dither the 8-bit texture read by ~half a quantization level so the
+    // smoothstep-sharpened field doesn't show contour stepping.
+    const qDither = fract(float(52.9829189).mul(fract(dot(screenCoordinate.xy, vec2(0.06711056, 0.00583715))))).sub(0.5).mul(1.0 / 255.0);
+    const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x.add(qDither));
     thresholded.assign(nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0));
   });
   return { thresholded, cloudP, cloudType, coverageMap, dimensionalProfile };
@@ -480,7 +483,7 @@ function sampleCloudDensity(u, p, noise, scale) {
 //   - blue-noise-style per-pixel dither on the march start to hide banding at
 //     a low step count
 // Camera-anchored sampling keeps the pattern fixed to the sky.
-const CLOUD_STEPS = 40;
+const CLOUD_STEPS = 64;
 const CLOUD_ABSORPTION = 7.0;
 
 function createSkyVolumeCloudMaterial(color, opacity, coverage, darkness, detailStrength, holes, cloudType, cloudBanks, sharpness, wispiness) {
