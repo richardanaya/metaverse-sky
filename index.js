@@ -403,12 +403,16 @@ function cloudBaseDensity(u, p, noise, scale) {
   const coverageMap = mix(1.0, nodeSmoothstep(0.32, 0.66, weather), u.uCloudBanks);
   const dimensionalProfile = verticalProfile.mul(u.uCoverage).mul(coverageMap);
 
-  // Perlin-Worley composite, baked into the R channel.
-  const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
-  const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
-
-  const thresholded = nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0);
-  return { thresholded, cloudP, cloudType, coverageMap };
+  // Nubis early-out: if the cheap dimensional profile says empty space, skip
+  // the shape fetch entirely (most of a partly-cloudy sky).
+  const thresholded = float(0.0).toVar();
+  If(dimensionalProfile.greaterThan(0.02), () => {
+    // Perlin-Worley composite, baked into the R channel.
+    const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
+    const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
+    thresholded.assign(nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0));
+  });
+  return { thresholded, cloudP, cloudType, coverageMap, dimensionalProfile };
 }
 
 // Light-tap density: 1 texture fetch. Reuses the view sample's coverage map
@@ -423,9 +427,13 @@ function cloudLightDensity(u, p, noise, scale, coverageMap) {
   const verticalProfile = nodeClamp(bottomGradient.mul(topGradient).mul(mix(9.5, 6.5, cloudType)), 0.0, 1.0);
   const cloudP = p.mul(vec3(1.0, mix(0.12, 0.28, cloudType), 1.0));
   const dimensionalProfile = verticalProfile.mul(u.uCoverage).mul(coverageMap);
-  const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
-  const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
-  return nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0);
+  const density = float(0.0).toVar();
+  If(dimensionalProfile.greaterThan(0.02), () => {
+    const shapeP = cloudP.mul(scale.mul(mix(0.20, 0.30, cloudType)));
+    const composite = nodeSmoothstep(0.18, 0.82, noise(shapeP).x);
+    density.assign(nodeClamp(composite.sub(oneMinus(dimensionalProfile)), 0.0, 1.0));
+  });
+  return density;
 }
 
 // Returns vec2(fineDensity, coarseDensity). `p` is world-space inside the fixed
@@ -433,24 +441,31 @@ function cloudLightDensity(u, p, noise, scale, coverageMap) {
 // composite, G = Worley detail) — trilinear fetches instead of hundreds of
 // procedural hash evaluations.
 function sampleCloudDensity(u, p, noise, scale) {
-  const { thresholded, cloudP, cloudType, coverageMap } = cloudBaseDensity(u, p, noise, scale);
+  const { thresholded, cloudP, cloudType, coverageMap, dimensionalProfile } = cloudBaseDensity(u, p, noise, scale);
 
-  // Mid-frequency billow: modulates density *inside* the mass so interiors get
-  // lumpy structure (and, through the density-driven shading, lumpy lighting)
-  // instead of saturating into a flat fill. Zero regions stay zero.
-  const billow = noise(cloudP.mul(scale.mul(mix(0.85, 1.25, cloudType)))).x;
-  const coarseDensity = nodeClamp(thresholded.mul(mix(0.55, 1.45, billow)), 0.0, 1.0);
+  const fine = float(0.0).toVar();
+  const coarse = float(0.0).toVar();
+  // Nubis early-out: billow/detail fetches only run where the base density
+  // actually produced cloud.
+  If(thresholded.greaterThan(0.0), () => {
+    // Mid-frequency billow: modulates density *inside* the mass so interiors
+    // get lumpy structure (and, through the density-driven shading, lumpy
+    // lighting) instead of saturating into a flat fill.
+    const billow = noise(cloudP.mul(scale.mul(mix(0.85, 1.25, cloudType)))).x;
+    const coarseDensity = nodeClamp(thresholded.mul(mix(0.55, 1.45, billow)), 0.0, 1.0);
 
-  // Fine erosion: strongest at the edges, but reaching partway into the
-  // interior so puff cores keep some cauliflower texture.
-  const detailP = cloudP.mul(scale.mul(mix(4.2, 6.0, cloudType)));
-  const detail = noise(detailP).y;
-  const edgeMask = oneMinus(nodeSmoothstep(0.22, 0.75, coarseDensity).mul(0.6));
-  const horizonFade = nodeSmoothstep(0.06, 0.24, normalize(p.sub(cameraPosition)).y);
-  const erosion = oneMinus(detail).mul(u.uHoles).mul(edgeMask).mul(horizonFade).mul(0.72);
-  const fineDensity = nodeClamp(coarseDensity.sub(erosion), 0.0, 1.0);
+    // Fine erosion: strongest at the edges, but reaching partway into the
+    // interior so puff cores keep some cauliflower texture.
+    const detailP = cloudP.mul(scale.mul(mix(4.2, 6.0, cloudType)));
+    const detail = noise(detailP).y;
+    const edgeMask = oneMinus(nodeSmoothstep(0.22, 0.75, coarseDensity).mul(0.6));
+    const horizonFade = nodeSmoothstep(0.06, 0.24, normalize(p.sub(cameraPosition)).y);
+    const erosion = oneMinus(detail).mul(u.uHoles).mul(edgeMask).mul(horizonFade).mul(0.72);
+    coarse.assign(coarseDensity);
+    fine.assign(nodeClamp(coarseDensity.sub(erosion), 0.0, 1.0));
+  });
 
-  return { fine: fineDensity, coarse: coarseDensity, coverageMap };
+  return { fine, coarse, coverageMap, dimensionalProfile };
 }
 
 // Volumetric cloud shader following the standard raymarch model:
